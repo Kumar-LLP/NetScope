@@ -110,13 +110,19 @@ def measure_target_latency(target: str = "1.1.1.1", port: int = 53, timeout_sec:
     Measures TCP connection latency in milliseconds to a reliable target (default Cloudflare DNS 1.1.1.1:53).
     Does not require Administrator or raw ICMP permissions.
     """
-    try:
-        start = time.perf_counter()
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout_sec)
-        s.connect((target, port))
-        s.close()
-        duration_ms = (time.perf_counter() - start) * 1000
-        return round(duration_ms, 2)
-    except Exception:
-        return None
+    # Prefer 1.1.1.1 or 8.8.8.8 for reliable public DNS TCP ping
+    targets_to_try = [(target, port)] if target not in ("1.1.1.1", "8.8.8.8") else []
+    targets_to_try.extend([("1.1.1.1", 53), ("8.8.8.8", 53)])
+
+    for host, p in targets_to_try:
+        try:
+            start = time.perf_counter()
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout_sec)
+            s.connect((host, p))
+            s.close()
+            duration_ms = (time.perf_counter() - start) * 1000
+            return round(duration_ms, 2)
+        except Exception:
+            continue
+    return None
