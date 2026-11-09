@@ -141,3 +141,108 @@ async def test_metrics_history_endpoint():
         response = await ac.get("/api/network/metrics/history?limit=10")
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+@pytest.mark.asyncio
+async def test_ip_calc_edge_cases():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # /32 (single host)
+        r32 = await ac.post("/api/diagnostics/ip-info", json={"ip_or_cidr": "192.168.1.1/32"})
+        assert r32.status_code == 200
+        d32 = r32.json()
+        assert d32["usable_hosts"] == 1
+        assert d32["total_hosts"] == 1
+        assert d32["usable_host_range"] == ["192.168.1.1", "192.168.1.1"]
+
+        # /31 (RFC 3021 point-to-point, 2 usable hosts)
+        r31 = await ac.post("/api/diagnostics/ip-info", json={"ip_or_cidr": "192.168.1.0/31"})
+        assert r31.status_code == 200
+        d31 = r31.json()
+        assert d31["usable_hosts"] == 2
+        assert d31["total_hosts"] == 2
+        assert d31["usable_host_range"] == ["192.168.1.0", "192.168.1.1"]
+
+        # /24 standard
+        r24 = await ac.post("/api/diagnostics/ip-info", json={"ip_or_cidr": "192.168.1.0/24"})
+        assert r24.status_code == 200
+        assert r24.json()["usable_hosts"] == 254
+        assert r24.json()["total_hosts"] == 256
+
+        # /8 large network (16,777,214 usable hosts, zero memory allocation)
+        r8 = await ac.post("/api/diagnostics/ip-info", json={"ip_or_cidr": "10.0.0.0/8"})
+        assert r8.status_code == 200
+        d8 = r8.json()
+        assert d8["usable_hosts"] == 16777214
+        assert d8["total_hosts"] == 16777216
+        assert d8["usable_host_range"] == ["10.0.0.1", "10.255.255.254"]
+
+        # /0 entire IPv4 space
+        r0 = await ac.post("/api/diagnostics/ip-info", json={"ip_or_cidr": "0.0.0.0/0"})
+        assert r0.status_code == 200
+        d0 = r0.json()
+        assert d0["total_hosts"] == 4294967296
+        assert d0["usable_hosts"] == 4294967294
+
+        # IPv6 prefix /64
+        r6 = await ac.post("/api/diagnostics/ip-info", json={"ip_or_cidr": "2001:db8::/64"})
+        assert r6.status_code == 200
+        d6 = r6.json()
+        assert d6["ip_version"] == 6
+        assert d6["usable_host_range"][0] == "2001:db8::"
+
+@pytest.mark.asyncio
+async def test_port_scan_security_guardrails():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Invalid port range (0, negative, >65535)
+        bad_port1 = await ac.post("/api/diagnostics/ports", json={
+            "target": "127.0.0.1",
+            "ports": [0],
+            "authorized": True
+        })
+        assert bad_port1.status_code == 422
+
+        bad_port2 = await ac.post("/api/diagnostics/ports", json={
+            "target": "127.0.0.1",
+            "ports": [70000],
+            "authorized": True
+        })
+        assert bad_port2.status_code == 422
+
+        # Public external target rejected even if authorized=True
+        ext_scan = await ac.post("/api/diagnostics/ports", json={
+            "target": "8.8.8.8",
+            "ports": [53],
+            "authorized": True
+        })
+        assert ext_scan.status_code == 403
+        assert "External scanning is prohibited" in ext_scan.json()["detail"]
+
+        # Nonexistent DNS hostname rejected
+        bad_host = await ac.post("/api/diagnostics/ports", json={
+            "target": "invalid-nonexistent-domain-xyz12345.notfound",
+            "ports": [80],
+            "authorized": True
+        })
+        assert bad_host.status_code in (422, 403)
+
+@pytest.mark.asyncio
+async def test_discovery_security_scope_and_size_guardrails():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Public WAN CIDR rejected
+        public_sweep = await ac.post("/api/devices/discover", json={
+            "cidr": "8.8.8.0/24"
+        })
+        assert public_sweep.status_code == 403
+        assert "outside authorized" in public_sweep.json()["detail"]
+
+        # Oversized network range rejected (> /24)
+        oversized_sweep = await ac.post("/api/devices/discover", json={
+            "cidr": "10.0.0.0/16"
+        })
+        assert oversized_sweep.status_code == 422
+        assert "Oversized network range" in oversized_sweep.json()["detail"]
+
+        # Malformed CIDR notation rejected
+        bad_cidr = await ac.post("/api/devices/discover", json={
+            "cidr": "not_a_valid_cidr"
+        })
+        assert bad_cidr.status_code == 422

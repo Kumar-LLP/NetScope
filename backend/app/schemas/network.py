@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -150,6 +150,24 @@ class PortScanRequest(BaseModel):
     ports: List[int] = Field(..., min_length=1, max_length=100)
     timeout_ms: int = Field(default=500, ge=100, le=3000)
     authorized: bool = Field(default=False)
+
+    @field_validator("ports")
+    @classmethod
+    def validate_port_range(cls, v: List[int]) -> List[int]:
+        for p in v:
+            if not isinstance(p, int) or p < 1 or p > 65535:
+                raise ValueError(f"Port number {p} is out of valid range (1-65535).")
+        return v
+
+    @field_validator("target")
+    @classmethod
+    def sanitize_target(cls, v: str) -> str:
+        clean = v.strip()
+        if not clean:
+            raise ValueError("Target host cannot be empty.")
+        if any(c in clean for c in [";", "&", "|", "`", "$", " ", "\n", "\r", "<", ">"]):
+            raise ValueError("Target contains illegal shell or control characters.")
+        return clean
 
 class PortResult(BaseModel):
     port: int

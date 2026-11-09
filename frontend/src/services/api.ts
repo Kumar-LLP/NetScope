@@ -13,7 +13,7 @@ import {
   SecurityFinding
 } from '../types/network';
 
-const API_BASE = '/api';
+const API_BASE = (import.meta as any).env?.VITE_API_URL || '/api';
 
 export const api = {
   async getHealth(): Promise<HealthInfo> {

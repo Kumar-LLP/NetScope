@@ -152,10 +152,18 @@ async def get_historical_database_metrics(
 async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depends(get_db)):
     """Triggers safe local subnet discovery and persists identified devices and scan results."""
     global _cached_devices
-    result = await discover_devices(
-        target_cidr=payload.cidr,
-        timeout_seconds=payload.timeout_seconds or 10
-    )
+    try:
+        result = await discover_devices(
+            target_cidr=payload.cidr,
+            timeout_seconds=payload.timeout_seconds or 10
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
     _cached_devices = result.devices
 
     # Persist scan metadata in database
@@ -374,14 +382,42 @@ async def port_scan_endpoint(payload: PortScanRequest, db: AsyncSession = Depend
         return res
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Port scan error: {str(e)}")
 
 @router.get("/security/findings", response_model=List[SecurityFindingSchema])
-async def list_security_findings():
-    """Runs security analysis engine against topology, inventory, and exposed services."""
+async def list_security_findings(db: AsyncSession = Depends(get_db)):
+    """Runs security analysis engine against topology, inventory, and exposed services with persistent baseline."""
     global _cached_devices, _last_open_ports
-    return security_auditor.audit_environment(_cached_devices, _last_open_ports)
+    baseline_mac = None
+    try:
+        res = await db.execute(
+            select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "gateway_baseline_mac")
+        )
+        setting = res.scalars().first()
+        if setting:
+            baseline_mac = setting.value
+        else:
+            gw_ip = get_default_gateway()
+            gw_mac = get_gateway_mac(gw_ip)
+            if gw_mac:
+                db.add(ApplicationSettingsModel(
+                    key="gateway_baseline_mac",
+                    value=gw_mac,
+                    description="Persisted Default Gateway MAC baseline for ARP spoofing detection"
+                ))
+                await db.commit()
+                baseline_mac = gw_mac
+    except Exception:
+        pass
+
+    return security_auditor.audit_environment(
+        devices=_cached_devices,
+        open_ports=_last_open_ports,
+        baseline_gateway_mac=baseline_mac
+    )
 
 @router.get("/history")
 async def get_scan_history(db: AsyncSession = Depends(get_db)):

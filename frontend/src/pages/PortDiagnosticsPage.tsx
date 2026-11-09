@@ -44,7 +44,7 @@ export const PortDiagnosticsPage: React.FC<PortDiagnosticsPageProps> = ({
   const [selectedProfile, setSelectedProfile] = useState<keyof typeof PORT_PROFILES>('top20');
   const [customPorts, setCustomPorts] = useState<string>('21, 22, 80, 443, 8000');
   const [useCustom, setUseCustom] = useState<boolean>(false);
-  const [authorized, setAuthorized] = useState<boolean>(true);
+  const [authorized, setAuthorized] = useState<boolean>(false);
   const [scanning, setScanning] = useState<boolean>(false);
   const [scanResult, setScanResult] = useState<PortScanResponse | null>(null);
 

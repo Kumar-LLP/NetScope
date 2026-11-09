@@ -131,19 +131,22 @@ cd backend
 .\.venv\Scripts\pytest.exe tests/ -v
 ```
 
-### Verified Test Results (12 / 12 Passed):
+### Verified Test Results (15 / 15 Passed):
 - `test_health_endpoint`: **PASSED** (Verifies FastAPI lifespan and SQLite WAL connectivity).
 - `test_interfaces_endpoint`: **PASSED** (Verifies physical/virtual NIC enumeration via psutil).
 - `test_overview_endpoint`: **PASSED** (Verifies health score calculation and gateway routing).
-- `test_ip_calc_endpoint`: **PASSED** (Verifies IPv4 CIDR binary decomposition and usable host range).
-- `test_port_scan_unauthorized_rejection`: **PASSED** (Verifies HTTP 403 Forbidden when unauthorized).
+- `test_ip_info_calculator`: **PASSED** (Verifies IPv4 CIDR binary decomposition and usable host range).
+- `test_port_scan_unauthorized_rejected`: **PASSED** (Verifies HTTP 403 Forbidden when unauthorized).
 - `test_port_scan_authorized_loopback`: **PASSED** (Verifies socket connect scanner on 127.0.0.1:8000).
 - `test_security_findings_endpoint`: **PASSED** (Verifies security rule evaluation SEC-001 through SEC-009).
-- `test_discovery_stop_and_progress`: **PASSED** (Verifies scan cancellation token and async progress reporting).
+- `test_stop_scan_and_progress_endpoints`: **PASSED** (Verifies scan cancellation token and async progress reporting).
 - `test_connectivity_benchmark_endpoint`: **PASSED** (Verifies 4-tier network benchmark execution).
-- `test_command_injection_rejection`: **PASSED** (Verifies shell metacharacter rejection with HTTP 422).
+- `test_input_validation_command_injection_rejected`: **PASSED** (Verifies shell metacharacter rejection with HTTP 422).
 - `test_history_endpoint`: **PASSED** (Verifies persistent SQLite audit trail retrieval).
-- `test_metric_history_endpoint`: **PASSED** (Verifies time-series telemetry storage for Recharts).
+- `test_metrics_history_endpoint`: **PASSED** (Verifies time-series telemetry storage for Recharts).
+- `test_ip_calc_edge_cases`: **PASSED** (Verifies mathematical calculation for /0, /8, /31, /32, and IPv6 /64).
+- `test_port_scan_security_guardrails`: **PASSED** (Verifies server-side rejection of external WAN targets and invalid ports).
+- `test_discovery_security_scope_and_size_guardrails`: **PASSED** (Verifies server-side rejection of WAN CIDRs and oversized ranges).
 
 ---
 

@@ -7,20 +7,48 @@ export function useTelemetry() {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<any>(null);
+  const backoffDelayRef = useRef<number>(1000);
+  const isMountedRef = useRef<boolean>(true);
 
   useEffect(() => {
-    function connect() {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.hostname}:8000/ws/network`;
+    isMountedRef.current = true;
 
+    function getWebSocketUrl(): string {
+      const customUrl = (import.meta as any).env?.VITE_WS_URL;
+      if (customUrl) return customUrl;
+
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      // Use relative host through Vite dev server proxy or Nginx reverse proxy
+      return `${protocol}//${window.location.host}/ws/network`;
+    }
+
+    function connect() {
+      if (!isMountedRef.current) return;
+
+      // Close previous socket if still open to prevent duplicate streams
+      if (wsRef.current) {
+        try {
+          wsRef.current.onclose = null;
+          wsRef.current.onerror = null;
+          wsRef.current.close();
+        } catch {
+          // ignore
+        }
+        wsRef.current = null;
+      }
+
+      const wsUrl = getWebSocketUrl();
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (!isMountedRef.current) return;
         setIsConnected(true);
+        backoffDelayRef.current = 1000; // Reset exponential backoff on successful connection
       };
 
       ws.onmessage = (event) => {
+        if (!isMountedRef.current) return;
         try {
           const data: TelemetryPayload = JSON.parse(event.data);
           setTelemetry(data);
@@ -37,26 +65,52 @@ export function useTelemetry() {
             return next.slice(-40);
           });
         } catch (e) {
-          console.error('Error parsing telemetry JSON:', e);
+          console.debug('Telemetry frame JSON parse error:', e);
         }
       };
 
       ws.onclose = () => {
+        if (!isMountedRef.current) return;
         setIsConnected(false);
-        // Retry connection after 2 seconds
-        reconnectTimeoutRef.current = setTimeout(connect, 2000);
+        wsRef.current = null;
+
+        // Exponential backoff retry (1s -> 1.5s -> 2.25s -> max 10s)
+        const delay = backoffDelayRef.current;
+        backoffDelayRef.current = Math.min(delay * 1.5, 10000);
+
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+        }
+        reconnectTimeoutRef.current = setTimeout(connect, delay);
       };
 
       ws.onerror = () => {
-        ws.close();
+        // Close triggers onclose where backoff logic executes
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
       };
     }
 
     connect();
 
     return () => {
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      if (wsRef.current) wsRef.current.close();
+      isMountedRef.current = false;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (wsRef.current) {
+        try {
+          wsRef.current.onclose = null;
+          wsRef.current.onerror = null;
+          wsRef.current.close();
+        } catch {
+          // ignore
+        }
+        wsRef.current = null;
+      }
     };
   }, []);
 

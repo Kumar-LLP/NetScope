@@ -201,44 +201,69 @@ def run_traceroute(target: str, max_hops: int = 15, timeout_ms: int = 1500) -> T
 
 def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
     """
-    Calculates IPv4 subnetting, usable host range, broadcast address, and binary formatting.
+    Calculates IPv4 and IPv6 subnetting, usable host range, broadcast address,
+    and binary formatting mathematically without memory allocation.
     """
-    ip_or_cidr = ip_or_cidr.strip()
+    clean_input = ip_or_cidr.strip()
     try:
-        if "/" in ip_or_cidr:
-            net = ipaddress.ip_network(ip_or_cidr, strict=False)
+        if "/" in clean_input:
+            net = ipaddress.ip_network(clean_input, strict=False)
             addr = net.network_address
         else:
-            addr = ipaddress.ip_address(ip_or_cidr)
-            net = ipaddress.ip_network(f"{ip_or_cidr}/32", strict=False)
+            addr = ipaddress.ip_address(clean_input)
+            suffix = "/32" if addr.version == 4 else "/128"
+            net = ipaddress.ip_network(f"{clean_input}{suffix}", strict=False)
     except Exception as e:
-        raise ValueError(f"Invalid IP/CIDR input: {str(e)}")
+        raise ValueError(f"Invalid IP/CIDR input '{clean_input}': {str(e)}")
 
     is_ipv4 = net.version == 4
-    netmask_str = str(net.netmask) if is_ipv4 else "N/A"
-    bcast_str = str(net.broadcast_address) if is_ipv4 and net.num_addresses > 1 else None
-
-    hosts = list(net.hosts()) if net.num_addresses <= 65536 else []
-    if hosts:
-        usable_range = [str(hosts[0]), str(hosts[-1])]
-        usable_count = len(hosts)
-    else:
-        usable_range = [str(net.network_address), str(net.network_address)]
-        usable_count = 1
+    total_hosts = net.num_addresses
 
     if is_ipv4:
+        netmask_str = str(net.netmask)
+        prefix = net.prefixlen
+        if prefix == 32:
+            usable_count = 1
+            usable_range = [str(net.network_address), str(net.network_address)]
+            bcast_str = None
+        elif prefix == 31:
+            # RFC 3021: Point-to-point links have 2 usable addresses
+            usable_count = 2
+            usable_range = [str(net.network_address), str(net.broadcast_address)]
+            bcast_str = str(net.broadcast_address)
+        else:
+            # prefix <= 30
+            usable_count = (2 ** (32 - prefix)) - 2
+            first_host = str(ipaddress.IPv4Address(int(net.network_address) + 1))
+            last_host = str(ipaddress.IPv4Address(int(net.broadcast_address) - 1))
+            usable_range = [first_host, last_host]
+            bcast_str = str(net.broadcast_address)
+
         binary_rep = ".".join(f"{int(octet):08b}" for octet in str(addr).split("."))
     else:
-        binary_rep = bin(int(addr))[2:]
+        # IPv6
+        netmask_str = str(net.netmask)
+        prefix = net.prefixlen
+        bcast_str = None  # IPv6 uses multicast, has no broadcast address
+        if prefix == 128:
+            usable_count = 1
+            usable_range = [str(net.network_address), str(net.network_address)]
+        else:
+            usable_count = 2 ** (128 - prefix)
+            first_host = str(net.network_address)
+            last_host = str(ipaddress.IPv6Address(int(net.network_address) + (2 ** (128 - prefix) - 1)))
+            usable_range = [first_host, last_host]
+
+        binary_rep = bin(int(addr))[2:].zfill(128)
 
     return IPInfoResponse(
-        input=ip_or_cidr,
+        input=clean_input,
         ip_version=net.version,
         network_address=str(net.network_address),
         netmask=netmask_str,
         broadcast_address=bcast_str,
         usable_host_range=usable_range,
-        total_hosts=net.num_addresses,
+        total_hosts=total_hosts,
         usable_hosts=usable_count,
         is_private=net.is_private,
         is_loopback=net.is_loopback,

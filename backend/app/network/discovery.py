@@ -6,7 +6,7 @@ import socket
 import subprocess
 import time
 import uuid
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone
 
 from app.network.interfaces import get_active_interface_ip, calculate_cidr, get_network_interfaces
@@ -14,22 +14,66 @@ from app.network.gateway import get_default_gateway, get_gateway_mac
 from app.network.vendor import lookup_vendor
 from app.schemas.network import DeviceSchema, DeviceDiscoverResponse
 
-# Global state for managing running discovery scans
-_cancel_event: asyncio.Event = asyncio.Event()
-_is_scanning: bool = False
-_current_progress: Dict[str, any] = {"scanned": 0, "total": 0, "status": "idle"}
+class DiscoverySession:
+    def __init__(self, scan_id: str, total_hosts: int):
+        self.scan_id = scan_id
+        self.cancel_event = asyncio.Event()
+        self.total_hosts = total_hosts
+        self.scanned_hosts = 0
+        self.status = "scanning"
+        self.start_time = time.perf_counter()
 
-def get_discovery_progress() -> Dict[str, any]:
-    return _current_progress
+    def get_progress(self) -> Dict[str, Any]:
+        return {
+            "scan_id": self.scan_id,
+            "scanned": self.scanned_hosts,
+            "total": self.total_hosts,
+            "status": self.status
+        }
 
-def stop_discovery():
-    """Signals any currently running discovery sweep to abort immediately."""
-    global _cancel_event
-    _cancel_event.set()
+_active_session: Optional[DiscoverySession] = None
+_session_lock = asyncio.Lock()
 
-def get_arp_table() -> Dict[str, str]:
+def get_discovery_progress(scan_id: Optional[str] = None) -> Dict[str, Any]:
+    """Returns the progress of the active discovery scan, or idle state."""
+    global _active_session
+    if _active_session:
+        if scan_id is None or _active_session.scan_id == scan_id:
+            return _active_session.get_progress()
+    return {"scan_id": None, "scanned": 0, "total": 0, "status": "idle"}
+
+def stop_discovery(scan_id: Optional[str] = None):
+    """Signals the running discovery sweep to cancel immediately."""
+    global _active_session
+    if _active_session:
+        if scan_id is None or _active_session.scan_id == scan_id:
+            _active_session.cancel_event.set()
+            _active_session.status = "stopped"
+
+def is_network_authorized(net: ipaddress.IPv4Network) -> bool:
+    """
+    Validates that the target network belongs to an authorized private/local range.
+    Rejects public external networks.
+    """
+    if net.is_private or net.is_loopback or net.is_link_local:
+        return True
+    
+    # Check if network matches any active local interface subnet
+    try:
+        interfaces = get_network_interfaces()
+        for iface in interfaces:
+            if iface.ip_address and iface.netmask:
+                iface_net = ipaddress.IPv4Network(f"{iface.ip_address}/{iface.netmask}", strict=False)
+                if net.network_address == iface_net.network_address:
+                    return True
+    except Exception:
+        pass
+    return False
+
+def get_arp_table(target_network: Optional[ipaddress.IPv4Network] = None) -> Dict[str, str]:
     """
     Parses the operating system's ARP cache.
+    Restricts results strictly to the authorized target network when provided.
     Returns mapping of {ip_address: mac_address}.
     """
     arp_entries: Dict[str, str] = {}
@@ -45,6 +89,12 @@ def get_arp_table() -> Dict[str, str]:
                 ip = match.group(1)
                 mac = match.group(2).replace("-", ":").upper()
                 if not mac.startswith("FF:FF") and not ip.startswith("224.") and not ip.startswith("239.") and not ip.endswith(".255"):
+                    if target_network is not None:
+                        try:
+                            if ipaddress.IPv4Address(ip) not in target_network:
+                                continue
+                        except Exception:
+                            continue
                     arp_entries[ip] = mac
     except Exception:
         pass
@@ -69,14 +119,14 @@ def ping_host_fast(ip: str, timeout_ms: int = 150) -> Optional[float]:
         pass
     return None
 
-async def async_probe_host(ip: str) -> Optional[float]:
+async def async_probe_host(ip: str, cancel_event: asyncio.Event) -> Optional[float]:
     """
-    Tries async TCP connect to port 80/443 first (takes ~1-5ms if alive or rejected),
+    Tries async TCP connect to common service ports (takes ~1-5ms if alive or rejected),
     falling back to threaded ping if needed.
     """
     start = time.perf_counter()
     for port in (80, 443, 135):
-        if _cancel_event.is_set():
+        if cancel_event.is_set():
             return None
         try:
             _, writer = await asyncio.wait_for(
@@ -92,7 +142,7 @@ async def async_probe_host(ip: str) -> Optional[float]:
         except Exception:
             continue
 
-    if _cancel_event.is_set():
+    if cancel_event.is_set():
         return None
 
     return await asyncio.to_thread(ping_host_fast, ip, 150)
@@ -110,24 +160,15 @@ async def resolve_hostname_safe(ip: str) -> Optional[str]:
 
 async def discover_devices(
     target_cidr: Optional[str] = None,
-    timeout_seconds: int = 10
+    timeout_seconds: int = 15
 ) -> DeviceDiscoverResponse:
     """
-    Discovers active devices on the local subnet using safe, non-privileged probes.
-    Supports mid-scan cancellation and progress updates.
+    Discovers active devices on the local subnet using safe, authorized, non-privileged probes.
+    Validates CIDR, enforces private scope boundaries, and supports cancellation.
     """
-    global _cancel_event, _is_scanning, _current_progress
-    _cancel_event.clear()
-    _is_scanning = True
+    global _active_session, _session_lock
 
-    start_time = time.perf_counter()
-    scan_id = str(uuid.uuid4())[:8]
-
-    active_ip = get_active_interface_ip() or "127.0.0.1"
-    gateway_ip = get_default_gateway()
-    gateway_mac = get_gateway_mac(gateway_ip)
-
-    # Determine default subnet CIDR if none provided
+    # Validate target network or resolve active default interface
     if not target_cidr:
         interfaces = get_network_interfaces()
         def_iface = next((i for i in interfaces if i.is_default and i.ip_address), None)
@@ -137,34 +178,68 @@ async def discover_devices(
             target_cidr = "192.168.1.0/24"
 
     try:
-        network = ipaddress.IPv4Network(target_cidr, strict=False)
-        # Security Guardrail: limit host count to at most 256 hosts per sweep to avoid router flood
-        all_hosts = list(network.hosts())[:256]
-    except Exception:
-        all_hosts = []
+        network = ipaddress.IPv4Network(target_cidr.strip(), strict=False)
+    except Exception as e:
+        raise ValueError(f"Invalid CIDR notation '{target_cidr}': {str(e)}")
 
-    _current_progress = {"scanned": 0, "total": len(all_hosts), "status": "scanning"}
+    # Security check: Target must belong to authorized private/local scope
+    if not is_network_authorized(network):
+        raise PermissionError(
+            f"Target CIDR '{target_cidr}' is outside authorized local/private network scope. "
+            "Public WAN subnet scanning is strictly prohibited."
+        )
 
-    initial_arp = get_arp_table()
-    semaphore = asyncio.Semaphore(60)
-    scanned_count = 0
+    # Security check: Prevent oversized sweeps
+    if network.num_addresses > 256:
+        raise ValueError(
+            f"Oversized network range (/{network.prefixlen} contains {network.num_addresses} addresses). "
+            "Maximum allowed subnet size is /24 (256 addresses) to prevent local network degradation."
+        )
+
+    all_hosts = list(network.hosts())
+
+    # Prevent concurrent conflicting scans
+    async with _session_lock:
+        if _active_session and _active_session.status == "scanning":
+            raise RuntimeError("A device discovery scan is already actively running. Stop it before initiating another.")
+
+        scan_id = str(uuid.uuid4())[:8]
+        session = DiscoverySession(scan_id=scan_id, total_hosts=len(all_hosts))
+        _active_session = session
+
+    start_time = time.perf_counter()
+    active_ip = get_active_interface_ip() or "127.0.0.1"
+    gateway_ip = get_default_gateway()
+    gateway_mac = get_gateway_mac(gateway_ip)
+
+    # Restrict ARP lookup strictly to target network
+    initial_arp = get_arp_table(target_network=network)
+    semaphore = asyncio.Semaphore(50)
 
     async def sem_probe(host_ip: str):
-        nonlocal scanned_count
-        if _cancel_event.is_set():
+        if session.cancel_event.is_set():
             return host_ip, None
         async with semaphore:
-            rtt = await async_probe_host(host_ip)
-            scanned_count += 1
-            _current_progress["scanned"] = scanned_count
+            rtt = await async_probe_host(host_ip, session.cancel_event)
+            session.scanned_hosts += 1
             return host_ip, rtt
 
+    probe_tasks = [sem_probe(str(h)) for h in all_hosts]
+    probe_results = []
+
     try:
-        probe_tasks = [sem_probe(str(h)) for h in all_hosts]
-        probe_results = await asyncio.gather(*probe_tasks, return_exceptions=True)
+        probe_results = await asyncio.wait_for(
+            asyncio.gather(*probe_tasks, return_exceptions=True),
+            timeout=float(timeout_seconds)
+        )
+        if session.cancel_event.is_set():
+            session.status = "stopped"
+        else:
+            session.status = "completed"
+    except asyncio.TimeoutError:
+        session.status = "timed_out"
     finally:
-        _is_scanning = False
-        _current_progress["status"] = "idle"
+        pass
 
     alive_ips: Dict[str, Optional[float]] = {}
     for res in probe_results:
@@ -173,15 +248,25 @@ async def discover_devices(
             if rtt is not None:
                 alive_ips[ip_str] = rtt
 
-    refreshed_arp = {**initial_arp, **get_arp_table()}
+    # Refresh ARP cache restricted to target network
+    refreshed_arp = {**initial_arp, **get_arp_table(target_network=network)}
 
+    # Ensure default gateway and local host are included if within this network
     if gateway_ip:
-        alive_ips.setdefault(gateway_ip, 1.2)
-        if gateway_mac:
-            refreshed_arp[gateway_ip] = gateway_mac
+        try:
+            if ipaddress.IPv4Address(gateway_ip) in network:
+                alive_ips.setdefault(gateway_ip, 1.2)
+                if gateway_mac:
+                    refreshed_arp[gateway_ip] = gateway_mac
+        except Exception:
+            pass
 
     if active_ip and active_ip != "127.0.0.1":
-        alive_ips.setdefault(active_ip, 0.1)
+        try:
+            if ipaddress.IPv4Address(active_ip) in network:
+                alive_ips.setdefault(active_ip, 0.1)
+        except Exception:
+            pass
 
     candidate_ips = sorted(
         set(alive_ips.keys()).union(set(refreshed_arp.keys())),

@@ -1,22 +1,39 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone
+import re
 
 from app.schemas.network import SecurityFindingSchema, DeviceSchema
 from app.network.gateway import get_default_gateway, get_gateway_mac, get_dns_servers
 
+DATABASE_PORTS: Dict[int, str] = {
+    1433: "Microsoft SQL Server (MSSQL)",
+    1521: "Oracle Database Listener",
+    3306: "MySQL / MariaDB",
+    5432: "PostgreSQL Database Server",
+    6379: "Redis In-Memory Key-Value Store",
+    27017: "MongoDB NoSQL Database Server"
+}
+
 class SecurityAuditor:
     def __init__(self):
         self.observed_gateway_mac: Optional[str] = None
-        self.known_devices_history: set[str] = set()
+        self.ip_mac_history: Dict[str, set[str]] = {}
+
+    def record_ip_mac_observation(self, ip: str, mac: str):
+        """Records an observed IP-to-MAC association to detect conflicting reassignments."""
+        if ip and mac:
+            self.ip_mac_history.setdefault(ip, set()).add(mac.upper())
 
     def audit_environment(
         self,
         devices: List[DeviceSchema],
-        open_ports: Optional[List[Dict]] = None
+        open_ports: Optional[List[Dict[str, Any]]] = None,
+        baseline_gateway_mac: Optional[str] = None,
+        raw_arp_observations: Optional[Dict[str, str]] = None
     ) -> List[SecurityFindingSchema]:
         """
-        Runs comprehensive security rules against active network topology,
-        discovered inventory, and exposed port results.
+        Runs comprehensive, heuristic-based security auditing against active topology,
+        inventory, observed ARP mappings, and exposed ports.
         """
         findings: List[SecurityFindingSchema] = []
         now = datetime.now(timezone.utc)
@@ -24,143 +41,177 @@ class SecurityAuditor:
         gw_ip = get_default_gateway()
         gw_mac = get_gateway_mac(gw_ip)
 
+        # Baseline MAC resolution (prioritize persistent baseline from DB if passed)
+        if baseline_gateway_mac:
+            effective_baseline = baseline_gateway_mac
+        elif self.observed_gateway_mac:
+            effective_baseline = self.observed_gateway_mac
+        else:
+            effective_baseline = gw_mac
+            self.observed_gateway_mac = gw_mac
+
         # Rule SEC-001: Gateway MAC Baseline & ARP Poisoning Audit
-        if gw_mac:
-            if self.observed_gateway_mac is None:
-                self.observed_gateway_mac = gw_mac
-            elif self.observed_gateway_mac != gw_mac:
+        if gw_mac and effective_baseline:
+            if effective_baseline != gw_mac:
                 findings.append(
                     SecurityFindingSchema(
                         rule_id="SEC-001",
                         severity="critical",
                         title="Default Gateway MAC Address Changed (Potential ARP Poisoning)",
                         category="mitm_detection",
-                        description="The hardware address of the default gateway has abruptly changed since monitoring started.",
-                        evidence=f"Previous MAC: {self.observed_gateway_mac} -> New MAC: {gw_mac} on Gateway IP {gw_ip}",
-                        impact="A rogue device on the local network may be executing an ARP spoofing attack to intercept your unencrypted internet traffic.",
-                        remediation="Inspect the local switch/router and check ARP tables using 'arp -a'. Verify router hardware authenticity.",
+                        description="The hardware address of the default gateway router has unexpectedly changed compared to the verified baseline.",
+                        evidence=f"Baseline Gateway MAC: {effective_baseline} -> Observed Active MAC: {gw_mac} on Gateway IP {gw_ip}",
+                        impact="A rogue device on the local network segment may be executing an ARP spoofing / poisoning attack to intercept or modify network packets.",
+                        remediation="Inspect your local router/switch ARP tables. Verify router MAC address against physical hardware sticker. Investigate suspicious connected devices.",
                         created_at=now
                     )
                 )
 
-        # Rule SEC-002: Duplicate IP Conflict Audit
-        ip_counts: Dict[str, List[str]] = {}
+        # Record observations for Rule SEC-002: Duplicate IP Conflict Detection
         for dev in devices:
-            if dev.mac:
-                ip_counts.setdefault(dev.ip, []).append(dev.mac)
+            if dev.ip and dev.mac:
+                self.record_ip_mac_observation(dev.ip, dev.mac)
 
-        for ip, macs in ip_counts.items():
-            if len(set(macs)) > 1:
+        if raw_arp_observations:
+            for ip, mac in raw_arp_observations.items():
+                self.record_ip_mac_observation(ip, mac)
+
+        # Check for multiple MACs associated with single IP
+        for ip, macs in self.ip_mac_history.items():
+            if len(macs) > 1:
                 findings.append(
                     SecurityFindingSchema(
                         rule_id="SEC-002",
                         severity="high",
                         title=f"IP Address Conflict Detected on {ip}",
                         category="ip_conflict",
-                        description=f"Multiple distinct MAC addresses are claiming the same IP address ({ip}).",
-                        evidence=f"MACs observed: {', '.join(macs)}",
-                        impact="Packets intended for this IP will experience intermittent routing failures or session hijacking.",
-                        remediation="Verify static IP assignments and configure DHCP reservations to avoid IP overlap.",
+                        description=f"Multiple distinct MAC addresses ({len(macs)}) have been observed claiming the same IP address ({ip}).",
+                        evidence=f"Conflicting hardware MAC addresses: {', '.join(sorted(macs))} for IP {ip}",
+                        impact="Packets directed to this IP will experience flapping routes, dropped packets, or possible session interception.",
+                        remediation="Check DHCP scope settings and static IP assignments on local network adapters to eliminate overlapping IP configurations.",
                         created_at=now
                     )
                 )
 
-        # Rule SEC-003: DNS Resolver Configuration Audit
+        # Rule SEC-003: DNS Resolver Hygiene & Encryption Audit
         dns_servers = get_dns_servers()
         for dns_ip in dns_servers:
-            is_secure_known = dns_ip in ("1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9")
+            is_secure_known = dns_ip in ("1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112")
             is_local_gw = (dns_ip == gw_ip)
-            if not is_secure_known and not is_local_gw and not dns_ip.startswith("127."):
+            is_loopback = dns_ip.startswith("127.") or dns_ip == "::1"
+            is_private = dns_ip.startswith("192.168.") or dns_ip.startswith("10.") or dns_ip.startswith("172.16.")
+
+            # Only flag as non-standard if external third-party unencrypted IP
+            if not is_secure_known and not is_local_gw and not is_loopback and not is_private:
                 findings.append(
                     SecurityFindingSchema(
                         rule_id="SEC-003",
                         severity="low",
-                        title=f"Non-Standard DNS Resolver in Use ({dns_ip})",
+                        title=f"Non-Standard External DNS Resolver in Use ({dns_ip})",
                         category="dns_hygiene",
-                        description="System queries are resolving through a third-party or ISP DNS resolver that may not support DNS-over-HTTPS (DoH).",
+                        description="System queries are resolving through an unverified external DNS server without standard DoH/DoT privacy protections.",
                         evidence=f"Active DNS Nameserver: {dns_ip}",
-                        impact="DNS queries can be monitored or redirected by intermediate network providers.",
-                        remediation="Consider configuring encrypted DNS (DoH/DoT) or utilizing trusted privacy-first resolvers (Cloudflare 1.1.1.1 or Quad9 9.9.9.9).",
+                        impact="Unencrypted DNS queries can be logged, profiled, or redirected by upstream ISPs and intermediate carriers.",
+                        remediation="Configure DNS-over-HTTPS (DoH) or switch to verified privacy-centric DNS providers (Cloudflare 1.1.1.1 or Quad9 9.9.9.9).",
                         created_at=now
                     )
                 )
 
-        # Port-Based Security Findings (from port diagnostics)
+        # Port-Based Heuristics (Exposed Services)
         if open_ports:
             for p in open_ports:
                 port_num = p.get("port")
                 target = p.get("target")
+                banner = (p.get("banner") or "").strip()
 
+                # Rule SEC-004: Telnet (Port 23)
                 if port_num == 23:
+                    is_confirmed = bool(banner and any(kw in banner.lower() for kw in ["login", "telnet", "welcome", "user"]))
                     findings.append(
                         SecurityFindingSchema(
                             rule_id="SEC-004",
-                            severity="high",
-                            title="Unencrypted Telnet Service Exposed (Port 23)",
+                            severity="critical" if is_confirmed else "high",
+                            title="Unencrypted Cleartext Telnet Service Exposed (Port 23)",
                             category="insecure_protocol",
-                            description=f"A Telnet management interface was detected listening on {target}:23.",
-                            evidence=f"Port 23 state: Open on {target}",
-                            impact="Telnet transmits usernames, passwords, and commands in cleartext over the wire, allowing easy packet sniffing.",
-                            remediation="Immediately disable Telnet service and migrate to SSH (Port 22) with key-based authentication.",
+                            description=f"A legacy unencrypted Telnet terminal service was detected active on {target}:23.",
+                            evidence=f"Port 23 open on {target}. Banner: '{banner or 'No banner grabbed'}'",
+                            impact="Telnet transmits authentication credentials and commands across the network in plaintext, allowing immediate eavesdropping.",
+                            remediation="Immediately disable Telnet daemon and migrate management sessions to SSH (Port 22) with key-based authentication.",
                             created_at=now
                         )
                     )
+
+                # Rule SEC-005: Plaintext FTP (Port 21)
                 elif port_num == 21:
-                    findings.append(
-                        SecurityFindingSchema(
-                            rule_id="SEC-005",
-                            severity="medium",
-                            title="Unencrypted Plain FTP Service Exposed (Port 21)",
-                            category="insecure_protocol",
-                            description=f"Standard FTP service was detected on {target}:21 without mandatory TLS/SSL.",
-                            evidence=f"Port 21 state: Open on {target}",
-                            impact="FTP credentials and transferred files can be captured by local eavesdroppers.",
-                            remediation="Switch to SFTP (over SSH) or configure FTPS with forced TLS encryption.",
-                            created_at=now
+                    has_tls = bool(banner and any(kw in banner.lower() for kw in ["tls", "ssl", "ftps"]))
+                    if not has_tls:
+                        findings.append(
+                            SecurityFindingSchema(
+                                rule_id="SEC-005",
+                                severity="medium",
+                                title="Unencrypted Plain FTP Service Exposed (Port 21)",
+                                category="insecure_protocol",
+                                description=f"Standard FTP service is active on {target}:21 without verified TLS enforcement.",
+                                evidence=f"Port 21 open on {target}. Banner: '{banner or 'No banner grabbed'}'",
+                                impact="FTP transmits usernames and passwords in cleartext. Transferred data can be intercepted on unencrypted networks.",
+                                remediation="Switch to SFTP (over SSH) or enforce FTPS (Explicit TLS) with mandatory encryption.",
+                                created_at=now
+                            )
                         )
-                    )
-                elif port_num in (3306, 5432, 27017):
+
+                # Rule SEC-006: Database Exposure (MSSQL, Oracle, MySQL, Postgres, Redis, Mongo)
+                elif port_num in DATABASE_PORTS:
+                    db_name = DATABASE_PORTS[port_num]
                     findings.append(
                         SecurityFindingSchema(
                             rule_id="SEC-006",
-                            severity="medium",
-                            title=f"Database Port Open on LAN ({port_num})",
+                            severity="high",
+                            title=f"Database Service Exposed on Network ({db_name})",
                             category="database_exposure",
-                            description=f"A production database listener (port {port_num}) is exposed directly on {target}.",
-                            evidence=f"Port {port_num} ({p.get('service')}) open",
-                            impact="Exposing databases directly to local network segments increases vulnerability to brute-force attacks and credential stuffing.",
-                            remediation="Bind database listener to localhost (127.0.0.1) or restrict access using local firewall rules and VPN tunnels.",
+                            description=f"{db_name} listener (Port {port_num}) is exposed directly on {target}.",
+                            evidence=f"Port {port_num} ({db_name}) active. Banner: '{banner or 'Standard DB Protocol'}'",
+                            impact="Direct database network exposure increases risk of brute-force attacks, unauthenticated probing, and data exfiltration.",
+                            remediation="Bind database daemon exclusively to localhost (127.0.0.1) or restrict network access using local firewall rules and VPN tunnels.",
                             created_at=now
                         )
                     )
+
+                # Rule SEC-007: Gateway Admin HTTP
                 elif port_num == 80 and target == gw_ip:
-                    findings.append(
-                        SecurityFindingSchema(
-                            rule_id="SEC-007",
-                            severity="medium",
-                            title="Router Admin Web Interface Accessible via Unencrypted HTTP",
-                            category="service_exposure",
-                            description=f"Port 80 (HTTP) was detected open on default gateway router {gw_ip} without forced HTTPS redirection.",
-                            evidence=f"Gateway {gw_ip}:80 listening and responsive",
-                            impact="Router administrative credentials can be intercepted by eavesdroppers on the same Wi-Fi or local switch.",
-                            remediation="Enable HTTPS for web administration in router settings and disable plain HTTP management.",
-                            created_at=now
+                    # Check if port 80 redirects to HTTPS
+                    redirects_to_https = bool(banner and "https://" in banner.lower())
+                    if not redirects_to_https:
+                        findings.append(
+                            SecurityFindingSchema(
+                                rule_id="SEC-007",
+                                severity="medium",
+                                title="Gateway Management Portal Accessible via Cleartext HTTP",
+                                category="service_exposure",
+                                description=f"Default gateway router {gw_ip} has HTTP port 80 open without verified forced redirection to HTTPS.",
+                                evidence=f"Port 80 open on {gw_ip}. Response Banner: '{banner or 'HTTP listener active'}'",
+                                impact="Router administrative sessions conducted over plain HTTP can expose admin passwords to local eavesdroppers.",
+                                remediation="Log into router administration settings, enable HTTPS web management, and disable cleartext HTTP access.",
+                                created_at=now
+                            )
                         )
-                    )
+
+                # Rule SEC-008: SMB / Windows File Sharing (Port 445 / 139)
                 elif port_num in (445, 139):
                     findings.append(
                         SecurityFindingSchema(
                             rule_id="SEC-008",
                             severity="medium",
-                            title=f"SMB / Windows File Sharing Exposed ({port_num})",
+                            title=f"SMB / Windows File Sharing Exposed (Port {port_num})",
                             category="file_sharing_exposure",
-                            description=f"Server Message Block (SMB) port {port_num} is active on {target}.",
-                            evidence=f"Port {port_num} state: Open on {target}",
-                            impact="Unprotected SMB shares can expose internal shared files and make the system susceptible to lateral movement attacks.",
-                            remediation="Ensure SMB signing is enforced, require password protection on all shares, or restrict SMB to trusted subnets via Windows Firewall.",
+                            description=f"Server Message Block (SMB) network service is active on {target}:{port_num}.",
+                            evidence=f"Port {port_num} active on {target}",
+                            impact="Unprotected or misconfigured SMB shares can expose internal files and provide opportunities for lateral movement attacks.",
+                            remediation="Ensure SMB signing is required, audit anonymous access, and restrict SMB to private subnets using Windows Defender Firewall.",
                             created_at=now
                         )
                     )
+
+                # Rule SEC-009: Remote Desktop Protocol (Port 3389)
                 elif port_num == 3389:
                     findings.append(
                         SecurityFindingSchema(
@@ -170,13 +221,13 @@ class SecurityAuditor:
                             category="remote_access_exposure",
                             description=f"Microsoft Remote Desktop listener is active on {target}:3389.",
                             evidence=f"Port 3389 open on {target}",
-                            impact="Open RDP endpoints on local or forwarded networks are primary targets for automated password brute-force attacks.",
-                            remediation="Require Network Level Authentication (NLA), enforce account lockout policies, and access RDP solely through VPN.",
+                            impact="RDP ports exposed across local or routed subnets are frequent targets for automated dictionary and brute-force attacks.",
+                            remediation="Enforce Network Level Authentication (NLA), implement account lockout policies, and access RDP solely through secure VPN.",
                             created_at=now
                         )
                     )
 
-        # Baseline Informational finding if everything is clean
+        # Baseline Info Finding if no issues detected
         if not findings:
             findings.append(
                 SecurityFindingSchema(
@@ -185,7 +236,7 @@ class SecurityAuditor:
                     title="Network Security Baseline Satisfied",
                     category="audit_baseline",
                     description="No rogue gateways, IP conflicts, or insecure unencrypted legacy management ports were detected.",
-                    evidence=f"Gateway {gw_ip} verified, {len(devices)} active devices analyzed.",
+                    evidence=f"Gateway {gw_ip} baseline verified ({effective_baseline or 'Verified'}), {len(devices)} active devices analyzed.",
                     impact="Local network segment operates within healthy configuration parameters.",
                     remediation="Maintain regular device discovery sweeps and keep router firmware updated.",
                     created_at=now
