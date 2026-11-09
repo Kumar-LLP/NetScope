@@ -8,6 +8,8 @@ from fastapi import WebSocket
 from app.schemas.network import TelemetryMessage, TelemetryBandwidth
 from app.network.interfaces import get_active_interface_ip
 from app.network.gateway import measure_target_latency, get_default_gateway
+from app.core.database import AsyncSessionLocal
+from app.models.entities import NetworkMetricModel
 
 def format_speed(bytes_per_sec: float) -> str:
     """Formats byte rate into human readable string (KB/s or MB/s)."""
@@ -22,7 +24,7 @@ def calculate_health_score(latency_ms: Optional[float], packet_loss: float = 0.0
     """Computes a deterministic network health score between 0 and 100."""
     score = 100
     if latency_ms is None:
-        return 20 # Disconnected or severe impairment
+        return 20
     if latency_ms > 150:
         score -= 40
     elif latency_ms > 80:
@@ -45,11 +47,11 @@ class TrafficMonitor:
         self._last_time = time.perf_counter()
         self.history: List[Dict] = []
         self.latest_telemetry: Optional[TelemetryMessage] = None
+        self._db_persist_counter: int = 0
 
     async def connect_client(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.add(websocket)
-        # Immediately send latest telemetry if available
         if self.latest_telemetry:
             try:
                 await websocket.send_text(self.latest_telemetry.model_dump_json())
@@ -69,6 +71,24 @@ class TrafficMonitor:
                 dead_connections.add(conn)
         for dead in dead_connections:
             self.active_connections.discard(dead)
+
+    async def persist_metric_to_db(self, download_rate: float, upload_rate: float, latency: Optional[float], loss: float, counters):
+        """Asynchronously inserts network metric record into SQLite WAL database."""
+        try:
+            async with AsyncSessionLocal() as session:
+                record = NetworkMetricModel(
+                    download_bytes_sec=download_rate,
+                    upload_bytes_sec=upload_rate,
+                    latency_ms=latency,
+                    packet_loss_pct=loss,
+                    total_bytes_sent=counters.bytes_sent,
+                    total_bytes_recv=counters.bytes_recv,
+                    timestamp=datetime.now(timezone.utc)
+                )
+                session.add(record)
+                await session.commit()
+        except Exception:
+            pass
 
     async def start_loop(self):
         """Continuous background task sampling network throughput at 1.5s intervals."""
@@ -92,7 +112,6 @@ class TrafficMonitor:
                 self._last_counters = current_counters
                 self._last_time = current_time
 
-                # Measure current latency
                 latency = measure_target_latency(gw, port=53, timeout_sec=0.5)
 
                 active_ip = get_active_interface_ip() or "127.0.0.1"
@@ -115,7 +134,6 @@ class TrafficMonitor:
 
                 self.latest_telemetry = msg
 
-                # Append to sliding window history (keep last 60 points)
                 self.history.append({
                     "timestamp": now_iso,
                     "download_kbps": round(download_rate / 1024, 2),
@@ -125,7 +143,18 @@ class TrafficMonitor:
                 if len(self.history) > 60:
                     self.history.pop(0)
 
-                # Broadcast to UI clients
+                # Persist to DB every ~10 iterations (~15s)
+                self._db_persist_counter += 1
+                if self._db_persist_counter >= 10:
+                    self._db_persist_counter = 0
+                    asyncio.create_task(
+                        self.persist_metric_to_db(
+                            download_rate, upload_rate, latency,
+                            0.0 if latency is not None else 100.0,
+                            current_counters
+                        )
+                    )
+
                 if self.active_connections:
                     await self.broadcast(msg)
 

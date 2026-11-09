@@ -40,6 +40,12 @@ export const api = {
     return res.json();
   },
 
+  async getMetricsHistory(limit: number = 50): Promise<any[]> {
+    const res = await fetch(`${API_BASE}/network/metrics/history?limit=${limit}`);
+    if (!res.ok) throw new Error('Failed to fetch database metric history');
+    return res.json();
+  },
+
   async discoverDevices(cidr?: string, timeoutSeconds: number = 10): Promise<DeviceDiscoverResponse> {
     const res = await fetch(`${API_BASE}/devices/discover`, {
       method: 'POST',
@@ -47,6 +53,20 @@ export const api = {
       body: JSON.stringify({ cidr, timeout_seconds: timeoutSeconds })
     });
     if (!res.ok) throw new Error('Failed to execute device discovery sweep');
+    return res.json();
+  },
+
+  async stopDiscovery(): Promise<{ status: string; message: string }> {
+    const res = await fetch(`${API_BASE}/devices/scan/stop`, {
+      method: 'POST'
+    });
+    if (!res.ok) throw new Error('Failed to stop discovery scan');
+    return res.json();
+  },
+
+  async getScanProgress(): Promise<{ scanned: number; total: number; status: string }> {
+    const res = await fetch(`${API_BASE}/devices/scan/progress`);
+    if (!res.ok) throw new Error('Failed to fetch scan progress');
     return res.json();
   },
 
@@ -111,6 +131,21 @@ export const api = {
       const err = await res.json().catch(() => ({ detail: 'IP Info error' }));
       throw new Error(err.detail || 'IP calculation failed');
     }
+    return res.json();
+  },
+
+  async runConnectivityTest(): Promise<{
+    verdict: string;
+    summary: string;
+    dns: { ok: boolean; latency_ms?: number; tested_domain: string };
+    gateway: { ok: boolean; latency_ms?: number; gateway_ip: string };
+    internet: { ok: boolean; latency_ms?: number; tested_target: string };
+    benchmark_duration_ms: number;
+  }> {
+    const res = await fetch(`${API_BASE}/diagnostics/connectivity`, {
+      method: 'POST'
+    });
+    if (!res.ok) throw new Error('Failed to run connectivity benchmark');
     return res.json();
   },
 

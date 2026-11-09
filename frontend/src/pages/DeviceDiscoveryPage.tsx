@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
 import { DiscoveredDevice } from '../types/network';
 import { Badge } from '../components/common/Badge';
+import { DeviceDetailDrawer } from '../components/common/DeviceDetailDrawer';
+import { useToast } from '../components/common/Toast';
 import {
   Search,
   RefreshCw,
@@ -11,15 +13,19 @@ import {
   Laptop,
   CheckCircle2,
   Copy,
-  Terminal
+  StopCircle,
+  Eye,
+  SlidersHorizontal
 } from 'lucide-react';
 
 interface DeviceDiscoveryPageProps {
-  onNavigateToDiagnostics?: (targetIp: string) => void;
+  onNavigateToPing?: (ip: string) => void;
+  onNavigateToPortScan?: (ip: string) => void;
 }
 
 export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
-  onNavigateToDiagnostics
+  onNavigateToPing,
+  onNavigateToPortScan
 }) => {
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
   const [cidr, setCidr] = useState<string>('');
@@ -27,6 +33,10 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [copiedIp, setCopiedIp] = useState<string | null>(null);
   const [scanDuration, setScanDuration] = useState<number | null>(null);
+  const [selectedDevice, setSelectedDevice] = useState<DiscoveredDevice | null>(null);
+  const [progress, setProgress] = useState<{ scanned: number; total: number }>({ scanned: 0, total: 254 });
+
+  const { addToast } = useToast();
 
   const loadInitialDevices = async () => {
     try {
@@ -43,29 +53,61 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
     loadInitialDevices();
   }, []);
 
+  // Poll scan progress while scanning
+  useEffect(() => {
+    let interval: any;
+    if (scanning) {
+      interval = setInterval(async () => {
+        try {
+          const prog = await api.getScanProgress();
+          if (prog && prog.total > 0) {
+            setProgress({ scanned: prog.scanned, total: prog.total });
+          }
+        } catch (e) {
+          // ignore
+        }
+      }, 500);
+    }
+    return () => clearInterval(interval);
+  }, [scanning]);
+
   const handleScan = async () => {
     try {
       setScanning(true);
+      addToast('info', 'Discovery Sweep Initiated', `Sweeping subnet ${cidr || 'auto'}...`);
       const res = await api.discoverDevices(cidr || undefined, 10);
       setDevices(res.devices);
       setScanDuration(res.duration_seconds);
-    } catch (err) {
-      alert(`Discovery scan error: ${err}`);
+      addToast('success', 'Discovery Complete', `Identified ${res.total_discovered} active hosts on subnet.`);
+    } catch (err: any) {
+      addToast('error', 'Discovery Sweep Failed', err.message);
     } finally {
       setScanning(false);
     }
   };
 
-  const copyToClipboard = (text: string) => {
+  const handleStop = async () => {
+    try {
+      await api.stopDiscovery();
+      setScanning(false);
+      addToast('info', 'Sweep Aborted', 'Cancellation signal sent to discovery engine.');
+    } catch (e: any) {
+      console.error(e);
+    }
+  };
+
+  const copyToClipboard = (e: React.MouseEvent, text: string) => {
+    e.stopPropagation();
     navigator.clipboard.writeText(text);
     setCopiedIp(text);
+    addToast('success', 'IP Copied', `Copied ${text} to clipboard.`);
     setTimeout(() => setCopiedIp(null), 2000);
   };
 
   const exportCSV = () => {
     if (!devices.length) return;
     const headers = ['IP Address', 'MAC Address', 'Vendor', 'Hostname', 'Role', 'Status', 'Response Time (ms)'];
-    const rows = devices.map(d => [
+    const rows = devices.map((d) => [
       d.ip,
       d.mac || 'N/A',
       `"${d.vendor}"`,
@@ -74,7 +116,7 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
       d.status,
       d.response_time_ms ?? 'N/A'
     ]);
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
@@ -82,6 +124,7 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    addToast('success', 'CSV Exported', `Saved ${devices.length} hosts to CSV file.`);
   };
 
   const exportJSON = () => {
@@ -93,9 +136,10 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    addToast('success', 'JSON Exported', `Saved ${devices.length} hosts to JSON file.`);
   };
 
-  const filtered = devices.filter(d => {
+  const filtered = devices.filter((d) => {
     const q = searchQuery.toLowerCase();
     return (
       d.ip.toLowerCase().includes(q) ||
@@ -104,6 +148,8 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
       (d.hostname && d.hostname.toLowerCase().includes(q))
     );
   });
+
+  const progressPercent = Math.min(100, Math.round((progress.scanned / Math.max(1, progress.total)) * 100));
 
   return (
     <div className="space-y-6">
@@ -155,23 +201,55 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
             />
           </div>
 
-          <button
-            onClick={handleScan}
-            disabled={scanning}
-            className="w-full sm:w-auto mt-auto flex items-center justify-center gap-2 px-5 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-sky-600 hover:from-cyan-400 hover:to-sky-500 text-black text-xs font-bold transition-all disabled:opacity-50 shadow-md"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${scanning ? 'animate-spin' : ''}`} />
-            <span>{scanning ? 'Sweeping Subnet...' : 'Run Discovery Sweep'}</span>
-          </button>
+          <div className="flex items-center gap-2 w-full sm:w-auto mt-auto">
+            {!scanning ? (
+              <button
+                onClick={handleScan}
+                className="w-full sm:w-auto flex items-center justify-center gap-2 px-5 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-sky-600 hover:from-cyan-400 hover:to-sky-500 text-black text-xs font-bold transition-all shadow-md"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Run Discovery Sweep</span>
+              </button>
+            ) : (
+              <button
+                onClick={handleStop}
+                className="w-full sm:w-auto flex items-center justify-center gap-2 px-5 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition-all shadow-md"
+              >
+                <StopCircle className="w-3.5 h-3.5" />
+                <span>Stop Sweep</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {scanDuration && (
           <div className="text-xs font-mono text-cyber-subtext flex items-center gap-2">
-            <span>Last Sweep:</span>
+            <span>Last Duration:</span>
             <span className="text-cyber-cyan font-medium">{scanDuration}s</span>
           </div>
         )}
       </div>
+
+      {/* Live Scan Progress Bar */}
+      {scanning && (
+        <div className="p-4 rounded-xl bg-cyan-950/30 border border-cyan-800/40 space-y-2 animate-in fade-in">
+          <div className="flex justify-between items-center text-xs font-mono">
+            <span className="text-cyber-cyan font-bold flex items-center gap-2">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              Sweeping ARP & TCP Sockets...
+            </span>
+            <span className="text-cyber-subtext">
+              {progress.scanned} / {progress.total} Hosts ({progressPercent}%)
+            </span>
+          </div>
+          <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-cyber-border">
+            <div
+              className="bg-gradient-to-r from-cyan-400 to-sky-500 h-full rounded-full transition-all duration-300"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Search Filter Strip */}
       <div className="flex items-center justify-between gap-4">
@@ -207,7 +285,11 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
             </thead>
             <tbody className="divide-y divide-cyber-border/60 font-mono">
               {filtered.map((dev, idx) => (
-                <tr key={idx} className="hover:bg-cyber-surface/60 transition-colors">
+                <tr
+                  key={idx}
+                  onClick={() => setSelectedDevice(dev)}
+                  className="hover:bg-cyber-surface/80 transition-colors cursor-pointer group"
+                >
                   <td className="py-3 px-4 text-cyber-cyan font-medium flex items-center gap-2">
                     {dev.is_gateway ? (
                       <Router className="w-4 h-4 text-sky-400" />
@@ -246,17 +328,26 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
                   </td>
 
                   <td className="py-3 px-4 text-right">
-                    <button
-                      onClick={() => copyToClipboard(dev.ip)}
-                      title="Copy IP to clipboard"
-                      className="p-1.5 rounded hover:bg-slate-800 text-cyber-subtext hover:text-cyber-text transition-colors"
-                    >
-                      {copiedIp === dev.ip ? (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
-                    </button>
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        onClick={(e) => copyToClipboard(e, dev.ip)}
+                        title="Copy IP to clipboard"
+                        className="p-1.5 rounded hover:bg-slate-800 text-cyber-subtext hover:text-cyber-text transition-colors"
+                      >
+                        {copiedIp === dev.ip ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                      <button
+                        onClick={() => setSelectedDevice(dev)}
+                        title="View Device Details"
+                        className="p-1.5 rounded hover:bg-slate-800 text-cyber-subtext hover:text-cyber-cyan transition-colors"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -271,6 +362,14 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
           </table>
         </div>
       </div>
+
+      {/* Device Detail Slide-out Drawer */}
+      <DeviceDetailDrawer
+        device={selectedDevice}
+        onClose={() => setSelectedDevice(null)}
+        onNavigateToPing={onNavigateToPing}
+        onNavigateToPortScan={onNavigateToPortScan}
+      />
     </div>
   );
 };

@@ -14,6 +14,19 @@ from app.network.gateway import get_default_gateway, get_gateway_mac
 from app.network.vendor import lookup_vendor
 from app.schemas.network import DeviceSchema, DeviceDiscoverResponse
 
+# Global state for managing running discovery scans
+_cancel_event: asyncio.Event = asyncio.Event()
+_is_scanning: bool = False
+_current_progress: Dict[str, any] = {"scanned": 0, "total": 0, "status": "idle"}
+
+def get_discovery_progress() -> Dict[str, any]:
+    return _current_progress
+
+def stop_discovery():
+    """Signals any currently running discovery sweep to abort immediately."""
+    global _cancel_event
+    _cancel_event.set()
+
 def get_arp_table() -> Dict[str, str]:
     """
     Parses the operating system's ARP cache.
@@ -63,6 +76,8 @@ async def async_probe_host(ip: str) -> Optional[float]:
     """
     start = time.perf_counter()
     for port in (80, 443, 135):
+        if _cancel_event.is_set():
+            return None
         try:
             _, writer = await asyncio.wait_for(
                 asyncio.open_connection(ip, port),
@@ -72,12 +87,14 @@ async def async_probe_host(ip: str) -> Optional[float]:
             await writer.wait_closed()
             return round((time.perf_counter() - start) * 1000, 2)
         except ConnectionRefusedError:
-            # Active host rejected connection
+            # Active host rejected connection: confirms host is alive
             return round((time.perf_counter() - start) * 1000, 2)
         except Exception:
             continue
 
-    # Fallback to single ping
+    if _cancel_event.is_set():
+        return None
+
     return await asyncio.to_thread(ping_host_fast, ip, 150)
 
 async def resolve_hostname_safe(ip: str) -> Optional[str]:
@@ -97,7 +114,12 @@ async def discover_devices(
 ) -> DeviceDiscoverResponse:
     """
     Discovers active devices on the local subnet using safe, non-privileged probes.
+    Supports mid-scan cancellation and progress updates.
     """
+    global _cancel_event, _is_scanning, _current_progress
+    _cancel_event.clear()
+    _is_scanning = True
+
     start_time = time.perf_counter()
     scan_id = str(uuid.uuid4())[:8]
 
@@ -116,22 +138,33 @@ async def discover_devices(
 
     try:
         network = ipaddress.IPv4Network(target_cidr, strict=False)
+        # Security Guardrail: limit host count to at most 256 hosts per sweep to avoid router flood
         all_hosts = list(network.hosts())[:256]
     except Exception:
         all_hosts = []
 
-    initial_arp = get_arp_table()
+    _current_progress = {"scanned": 0, "total": len(all_hosts), "status": "scanning"}
 
-    # Bounded concurrent sweep to wake up ARP
+    initial_arp = get_arp_table()
     semaphore = asyncio.Semaphore(60)
+    scanned_count = 0
 
     async def sem_probe(host_ip: str):
+        nonlocal scanned_count
+        if _cancel_event.is_set():
+            return host_ip, None
         async with semaphore:
             rtt = await async_probe_host(host_ip)
+            scanned_count += 1
+            _current_progress["scanned"] = scanned_count
             return host_ip, rtt
 
-    probe_tasks = [sem_probe(str(h)) for h in all_hosts]
-    probe_results = await asyncio.gather(*probe_tasks, return_exceptions=True)
+    try:
+        probe_tasks = [sem_probe(str(h)) for h in all_hosts]
+        probe_results = await asyncio.gather(*probe_tasks, return_exceptions=True)
+    finally:
+        _is_scanning = False
+        _current_progress["status"] = "idle"
 
     alive_ips: Dict[str, Optional[float]] = {}
     for res in probe_results:
@@ -140,7 +173,6 @@ async def discover_devices(
             if rtt is not None:
                 alive_ips[ip_str] = rtt
 
-    # Refresh ARP table
     refreshed_arp = {**initial_arp, **get_arp_table()}
 
     if gateway_ip:
@@ -156,7 +188,6 @@ async def discover_devices(
         key=lambda x: [int(p) for p in x.split('.') if p.isdigit()]
     )
 
-    # Resolve hostnames concurrently for discovered candidates
     hostname_tasks = [resolve_hostname_safe(ip) for ip in candidate_ips]
     hostnames = await asyncio.gather(*hostname_tasks, return_exceptions=True)
     hostname_map = {

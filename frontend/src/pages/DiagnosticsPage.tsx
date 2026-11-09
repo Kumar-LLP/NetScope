@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
 import {
   PingResponse,
@@ -7,6 +7,7 @@ import {
   IPInfoResponse
 } from '../types/network';
 import { Badge } from '../components/common/Badge';
+import { useToast } from '../components/common/Toast';
 import {
   Activity,
   Terminal,
@@ -16,14 +17,26 @@ import {
   Play,
   RotateCcw,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  ShieldCheck,
+  Server,
+  Router,
+  Wifi
 } from 'lucide-react';
 
-export const DiagnosticsPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'ping' | 'dns' | 'traceroute' | 'ipinfo'>('ping');
+interface DiagnosticsPageProps {
+  initialTarget?: string;
+  initialTab?: 'ping' | 'dns' | 'traceroute' | 'ipinfo' | 'connectivity';
+}
+
+export const DiagnosticsPage: React.FC<DiagnosticsPageProps> = ({
+  initialTarget,
+  initialTab = 'ping'
+}) => {
+  const [activeTab, setActiveTab] = useState<'ping' | 'dns' | 'traceroute' | 'ipinfo' | 'connectivity'>(initialTab);
 
   // Ping State
-  const [pingTarget, setPingTarget] = useState<string>('1.1.1.1');
+  const [pingTarget, setPingTarget] = useState<string>(initialTarget || '1.1.1.1');
   const [pingCount, setPingCount] = useState<number>(4);
   const [pingLoading, setPingLoading] = useState<boolean>(false);
   const [pingResult, setPingResult] = useState<PingResponse | null>(null);
@@ -35,7 +48,7 @@ export const DiagnosticsPage: React.FC = () => {
   const [dnsResult, setDnsResult] = useState<DNSResponse | null>(null);
 
   // Traceroute State
-  const [traceTarget, setTraceTarget] = useState<string>('8.8.8.8');
+  const [traceTarget, setTraceTarget] = useState<string>(initialTarget || '8.8.8.8');
   const [traceHops, setTraceHops] = useState<number>(15);
   const [traceLoading, setTraceLoading] = useState<boolean>(false);
   const [traceResult, setTraceResult] = useState<TracerouteResponse | null>(null);
@@ -45,14 +58,31 @@ export const DiagnosticsPage: React.FC = () => {
   const [ipLoading, setIpLoading] = useState<boolean>(false);
   const [ipResult, setIpResult] = useState<IPInfoResponse | null>(null);
 
+  // Connectivity Benchmark State
+  const [connLoading, setConnLoading] = useState<boolean>(false);
+  const [connResult, setConnResult] = useState<any>(null);
+
+  const { addToast } = useToast();
+
+  useEffect(() => {
+    if (initialTarget) {
+      setPingTarget(initialTarget);
+      setTraceTarget(initialTarget);
+    }
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTarget, initialTab]);
+
   const handlePing = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       setPingLoading(true);
       const res = await api.runPing(pingTarget, pingCount);
       setPingResult(res);
+      addToast('success', 'Ping Operation Complete', `Avg RTT: ${res.avg_rtt_ms ?? 'N/A'} ms`);
     } catch (err: any) {
-      alert(`Ping error: ${err.message}`);
+      addToast('error', 'Ping Operation Failed', err.message);
     } finally {
       setPingLoading(false);
     }
@@ -64,8 +94,9 @@ export const DiagnosticsPage: React.FC = () => {
       setDnsLoading(true);
       const res = await api.runDNS(dnsDomain, dnsType);
       setDnsResult(res);
+      addToast('success', 'DNS Resolution Complete', `Resolved in ${res.query_time_ms} ms`);
     } catch (err: any) {
-      alert(`DNS error: ${err.message}`);
+      addToast('error', 'DNS Resolution Failed', err.message);
     } finally {
       setDnsLoading(false);
     }
@@ -75,10 +106,12 @@ export const DiagnosticsPage: React.FC = () => {
     e.preventDefault();
     try {
       setTraceLoading(true);
+      addToast('info', 'Traceroute Started', `Tracing hop path to ${traceTarget}...`);
       const res = await api.runTraceroute(traceTarget, traceHops);
       setTraceResult(res);
+      addToast('success', 'Traceroute Complete', `Discovered ${res.total_hops} network hops.`);
     } catch (err: any) {
-      alert(`Traceroute error: ${err.message}`);
+      addToast('error', 'Traceroute Failed', err.message);
     } finally {
       setTraceLoading(false);
     }
@@ -91,9 +124,27 @@ export const DiagnosticsPage: React.FC = () => {
       const res = await api.getIPInfo(ipInput);
       setIpResult(res);
     } catch (err: any) {
-      alert(`IP calculation error: ${err.message}`);
+      addToast('error', 'Subnet Calculation Error', err.message);
     } finally {
       setIpLoading(false);
+    }
+  };
+
+  const handleConnectivityTest = async () => {
+    try {
+      setConnLoading(true);
+      addToast('info', 'Benchmarking Connectivity', 'Testing DNS, Gateway, and Internet WAN...');
+      const res = await api.runConnectivityTest();
+      setConnResult(res);
+      addToast(
+        res.verdict === 'HEALTHY' ? 'success' : 'error',
+        `Connectivity Benchmark: ${res.verdict}`,
+        res.summary
+      );
+    } catch (err: any) {
+      addToast('error', 'Benchmark Failed', err.message);
+    } finally {
+      setConnLoading(false);
     }
   };
 
@@ -112,7 +163,7 @@ export const DiagnosticsPage: React.FC = () => {
         </div>
 
         {/* Tab Buttons */}
-        <div className="flex items-center gap-1.5 p-1 rounded-xl bg-cyber-card border border-cyber-border self-start sm:self-auto">
+        <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-xl bg-cyber-card border border-cyber-border self-start sm:self-auto">
           <button
             onClick={() => setActiveTab('ping')}
             className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
@@ -122,7 +173,7 @@ export const DiagnosticsPage: React.FC = () => {
             }`}
           >
             <Activity className="w-3.5 h-3.5" />
-            <span>Ping Test</span>
+            <span>Ping</span>
           </button>
 
           <button
@@ -134,7 +185,7 @@ export const DiagnosticsPage: React.FC = () => {
             }`}
           >
             <Globe className="w-3.5 h-3.5" />
-            <span>DNS Lookup</span>
+            <span>DNS</span>
           </button>
 
           <button
@@ -158,7 +209,19 @@ export const DiagnosticsPage: React.FC = () => {
             }`}
           >
             <Calculator className="w-3.5 h-3.5" />
-            <span>IP Calculator</span>
+            <span>Subnet Calc</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('connectivity')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              activeTab === 'connectivity'
+                ? 'bg-cyber-surface text-emerald-400 border border-emerald-500/40'
+                : 'text-cyber-subtext hover:text-cyber-text'
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Connectivity Test</span>
           </button>
         </div>
       </div>
@@ -502,6 +565,96 @@ export const DiagnosticsPage: React.FC = () => {
                   <span className="text-[10px] text-slate-400 truncate max-w-[200px]">
                     {ipResult.binary_representation}
                   </span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 5. CONNECTIVITY BENCHMARK TAB */}
+      {activeTab === 'connectivity' && (
+        <div className="space-y-6">
+          <div className="bg-cyber-card border border-cyber-border rounded-xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-semibold text-cyber-text">One-Click Network Health Benchmark</h3>
+              <p className="text-xs text-cyber-subtext mt-1">
+                Sequentially tests DNS lookup, default gateway ICMP ping, and public WAN uplink.
+              </p>
+            </div>
+            <button
+              onClick={handleConnectivityTest}
+              disabled={connLoading}
+              className="flex items-center gap-2 px-6 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold transition-all shadow-md disabled:opacity-50"
+            >
+              <Play className={`w-3.5 h-3.5 ${connLoading ? 'animate-spin' : ''}`} />
+              <span>{connLoading ? 'Benchmarking...' : 'Run Connectivity Benchmark'}</span>
+            </button>
+          </div>
+
+          {connResult && (
+            <div className="space-y-4 animate-in fade-in">
+              {/* Verdict Card */}
+              <div
+                className={`p-5 rounded-xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 ${
+                  connResult.verdict === 'HEALTHY'
+                    ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-400'
+                    : 'bg-amber-950/30 border-amber-800/60 text-amber-400'
+                }`}
+              >
+                <div>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-5 h-5" />
+                    <h3 className="text-sm font-bold text-cyber-text">
+                      Network Verdict: {connResult.verdict}
+                    </h3>
+                  </div>
+                  <p className="text-xs text-cyber-subtext mt-1">{connResult.summary}</p>
+                </div>
+                <Badge variant={connResult.verdict === 'HEALTHY' ? 'emerald' : 'amber'}>
+                  {connResult.benchmark_duration_ms} ms benchmark
+                </Badge>
+              </div>
+
+              {/* 3 Tier Benchmark Breakdown */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="bg-cyber-card border border-cyber-border rounded-xl p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-cyber-subtext font-sans">Tier 1: Domain Name (DNS)</span>
+                    <Server className="w-4 h-4 text-purple-400" />
+                  </div>
+                  <div className="text-base font-bold font-mono text-cyber-text">
+                    {connResult.dns.ok ? 'Resolving OK' : 'DNS Failed'}
+                  </div>
+                  <div className="text-xs font-mono text-cyber-cyan">
+                    {connResult.dns.latency_ms ? `${connResult.dns.latency_ms} ms` : '—'}
+                  </div>
+                </div>
+
+                <div className="bg-cyber-card border border-cyber-border rounded-xl p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-cyber-subtext font-sans">Tier 2: Router Gateway</span>
+                    <Router className="w-4 h-4 text-sky-400" />
+                  </div>
+                  <div className="text-base font-bold font-mono text-cyber-text">
+                    {connResult.gateway.ok ? 'Gateway Reachable' : 'Gateway Dropped'}
+                  </div>
+                  <div className="text-xs font-mono text-sky-400">
+                    {connResult.gateway.latency_ms ? `${connResult.gateway.latency_ms} ms` : 'No ICMP Reply'}
+                  </div>
+                </div>
+
+                <div className="bg-cyber-card border border-cyber-border rounded-xl p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-cyber-subtext font-sans">Tier 3: Public Internet WAN</span>
+                    <Wifi className="w-4 h-4 text-emerald-400" />
+                  </div>
+                  <div className="text-base font-bold font-mono text-cyber-text">
+                    {connResult.internet.ok ? 'Internet Online' : 'Internet Offline'}
+                  </div>
+                  <div className="text-xs font-mono text-emerald-400">
+                    {connResult.internet.latency_ms ? `${connResult.internet.latency_ms} ms` : 'Offline'}
+                  </div>
                 </div>
               </div>
             </div>

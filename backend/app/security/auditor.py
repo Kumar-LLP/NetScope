@@ -3,11 +3,11 @@ from datetime import datetime, timezone
 
 from app.schemas.network import SecurityFindingSchema, DeviceSchema
 from app.network.gateway import get_default_gateway, get_gateway_mac, get_dns_servers
-from app.network.interfaces import get_network_interfaces
 
 class SecurityAuditor:
     def __init__(self):
         self.observed_gateway_mac: Optional[str] = None
+        self.known_devices_history: set[str] = set()
 
     def audit_environment(
         self,
@@ -24,7 +24,7 @@ class SecurityAuditor:
         gw_ip = get_default_gateway()
         gw_mac = get_gateway_mac(gw_ip)
 
-        # Rule 1: Gateway MAC Baseline & ARP Poisoning Audit
+        # Rule SEC-001: Gateway MAC Baseline & ARP Poisoning Audit
         if gw_mac:
             if self.observed_gateway_mac is None:
                 self.observed_gateway_mac = gw_mac
@@ -43,7 +43,7 @@ class SecurityAuditor:
                     )
                 )
 
-        # Rule 2: Duplicate IP Conflict Audit
+        # Rule SEC-002: Duplicate IP Conflict Audit
         ip_counts: Dict[str, List[str]] = {}
         for dev in devices:
             if dev.mac:
@@ -65,10 +65,9 @@ class SecurityAuditor:
                     )
                 )
 
-        # Rule 3: DNS Resolver Configuration Audit
+        # Rule SEC-003: DNS Resolver Configuration Audit
         dns_servers = get_dns_servers()
         for dns_ip in dns_servers:
-            # Check for known secure resolvers or local router
             is_secure_known = dns_ip in ("1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9")
             is_local_gw = (dns_ip == gw_ip)
             if not is_secure_known and not is_local_gw and not dns_ip.startswith("127."):
@@ -86,11 +85,12 @@ class SecurityAuditor:
                     )
                 )
 
-        # Rule 4: Exposed Insecure Services Audit (from port diagnostics)
+        # Port-Based Security Findings (from port diagnostics)
         if open_ports:
             for p in open_ports:
                 port_num = p.get("port")
                 target = p.get("target")
+
                 if port_num == 23:
                     findings.append(
                         SecurityFindingSchema(
@@ -130,6 +130,48 @@ class SecurityAuditor:
                             evidence=f"Port {port_num} ({p.get('service')}) open",
                             impact="Exposing databases directly to local network segments increases vulnerability to brute-force attacks and credential stuffing.",
                             remediation="Bind database listener to localhost (127.0.0.1) or restrict access using local firewall rules and VPN tunnels.",
+                            created_at=now
+                        )
+                    )
+                elif port_num == 80 and target == gw_ip:
+                    findings.append(
+                        SecurityFindingSchema(
+                            rule_id="SEC-007",
+                            severity="medium",
+                            title="Router Admin Web Interface Accessible via Unencrypted HTTP",
+                            category="service_exposure",
+                            description=f"Port 80 (HTTP) was detected open on default gateway router {gw_ip} without forced HTTPS redirection.",
+                            evidence=f"Gateway {gw_ip}:80 listening and responsive",
+                            impact="Router administrative credentials can be intercepted by eavesdroppers on the same Wi-Fi or local switch.",
+                            remediation="Enable HTTPS for web administration in router settings and disable plain HTTP management.",
+                            created_at=now
+                        )
+                    )
+                elif port_num in (445, 139):
+                    findings.append(
+                        SecurityFindingSchema(
+                            rule_id="SEC-008",
+                            severity="medium",
+                            title=f"SMB / Windows File Sharing Exposed ({port_num})",
+                            category="file_sharing_exposure",
+                            description=f"Server Message Block (SMB) port {port_num} is active on {target}.",
+                            evidence=f"Port {port_num} state: Open on {target}",
+                            impact="Unprotected SMB shares can expose internal shared files and make the system susceptible to lateral movement attacks.",
+                            remediation="Ensure SMB signing is enforced, require password protection on all shares, or restrict SMB to trusted subnets via Windows Firewall.",
+                            created_at=now
+                        )
+                    )
+                elif port_num == 3389:
+                    findings.append(
+                        SecurityFindingSchema(
+                            rule_id="SEC-009",
+                            severity="medium",
+                            title="Remote Desktop Protocol (RDP) Exposed (Port 3389)",
+                            category="remote_access_exposure",
+                            description=f"Microsoft Remote Desktop listener is active on {target}:3389.",
+                            evidence=f"Port 3389 open on {target}",
+                            impact="Open RDP endpoints on local or forwarded networks are primary targets for automated password brute-force attacks.",
+                            remediation="Require Network Level Authentication (NLA), enforce account lockout policies, and access RDP solely through VPN.",
                             created_at=now
                         )
                     )

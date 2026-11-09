@@ -1,18 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { TelemetryPayload } from '../../types/network';
-import { ArrowDown, ArrowUp, Activity, Wifi, BookOpen, ShieldCheck } from 'lucide-react';
+import { ArrowDown, ArrowUp, Activity, Search, Bell, BookOpen } from 'lucide-react';
 import { Badge } from '../common/Badge';
 
 interface TopbarProps {
   telemetry: TelemetryPayload | null;
   wsConnected: boolean;
   onOpenGlossary: () => void;
+  onOpenSearch: () => void;
+  onOpenNotifications: () => void;
 }
 
 export const Topbar: React.FC<TopbarProps> = ({
   telemetry,
   wsConnected,
-  onOpenGlossary
+  onOpenGlossary,
+  onOpenSearch,
+  onOpenNotifications
 }) => {
   const [timeStr, setTimeStr] = useState<string>('');
 
@@ -55,8 +59,33 @@ export const Topbar: React.FC<TopbarProps> = ({
         </div>
       </div>
 
+      {/* Center Search Bar Trigger */}
+      <div className="flex items-center">
+        <button
+          onClick={onOpenSearch}
+          className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-cyber-card border border-cyber-border hover:border-cyber-cyan/50 text-xs text-cyber-subtext hover:text-cyber-text transition-all group"
+          title="Global Search (Ctrl+K)"
+        >
+          <Search className="w-3.5 h-3.5 text-cyber-cyan group-hover:scale-110 transition-transform" />
+          <span className="hidden lg:inline text-xs">Search tools, hosts & IPs...</span>
+          <kbd className="hidden sm:inline-block px-1.5 py-0.5 text-[10px] font-mono bg-slate-900 border border-slate-700 text-slate-400 rounded">
+            Ctrl+K
+          </kbd>
+        </button>
+      </div>
+
       {/* Right Controls & Clock */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
+        {/* Notification Bell */}
+        <button
+          onClick={onOpenNotifications}
+          className="relative p-2 rounded-lg bg-cyber-card border border-cyber-border hover:border-cyber-cyan/50 text-cyber-subtext hover:text-cyber-text transition-colors"
+          title="Notification Center"
+        >
+          <Bell className="w-4 h-4 text-cyber-subtext" />
+          <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-cyber-cyan animate-pulse border-2 border-cyber-surface" />
+        </button>
+
         <button
           onClick={onOpenGlossary}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyber-card border border-cyber-border hover:border-cyber-blue text-xs font-medium text-cyber-text transition-colors"
@@ -65,7 +94,7 @@ export const Topbar: React.FC<TopbarProps> = ({
           <span className="hidden sm:inline">Learn Networking</span>
         </button>
 
-        <div className="flex items-center gap-2 text-xs font-mono text-cyber-subtext px-2 py-1 rounded bg-slate-900 border border-slate-800">
+        <div className="hidden sm:flex items-center gap-2 text-xs font-mono text-cyber-subtext px-2 py-1 rounded bg-slate-900 border border-slate-800">
           <span>UTC</span>
           <span className="text-cyber-text font-medium">{timeStr}</span>
         </div>

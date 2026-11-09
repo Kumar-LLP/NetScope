@@ -33,8 +33,14 @@ const PORT_PROFILES = {
   }
 };
 
-export const PortDiagnosticsPage: React.FC = () => {
-  const [target, setTarget] = useState<string>('127.0.0.1');
+interface PortDiagnosticsPageProps {
+  initialTarget?: string;
+}
+
+export const PortDiagnosticsPage: React.FC<PortDiagnosticsPageProps> = ({
+  initialTarget
+}) => {
+  const [target, setTarget] = useState<string>(initialTarget || '127.0.0.1');
   const [selectedProfile, setSelectedProfile] = useState<keyof typeof PORT_PROFILES>('top20');
   const [customPorts, setCustomPorts] = useState<string>('21, 22, 80, 443, 8000');
   const [useCustom, setUseCustom] = useState<boolean>(false);

@@ -4,7 +4,7 @@ import re
 import socket
 import subprocess
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import dns.resolver
 
 from app.schemas.network import (
@@ -14,16 +14,28 @@ from app.schemas.network import (
     TracerouteResponse,
     IPInfoResponse
 )
+from app.network.gateway import get_default_gateway
+
+def sanitize_target(target: str) -> str:
+    """
+    Strict RFC 1123 target sanitizer to prevent command injection or flag injection.
+    """
+    clean = target.strip()
+    if not clean or len(clean) > 253:
+        raise ValueError("Target must be between 1 and 253 characters.")
+    # Disallow leading hyphens to prevent CLI argument injection
+    if clean.startswith("-") or clean.startswith("/"):
+        raise ValueError("Target cannot begin with flag indicators ('-' or '/').")
+    # Allow valid domain characters, IPv4, IPv6
+    if not re.match(r"^[a-zA-Z0-9\.\-_:]+$", clean):
+        raise ValueError("Target contains illegal characters.")
+    return clean
 
 def run_ping(target: str, count: int = 4, timeout_ms: int = 1000) -> PingResponse:
     """
     Executes a genuine ICMP ping operation using tokenized system commands (zero shell injection).
-    Parses transmission statistics and RTT latency metrics.
     """
-    # Strict validation of target
-    if not re.match(r"^[a-zA-Z0-9\.\-_:]+$", target):
-        raise ValueError("Invalid target format for ping operation")
-
+    target = sanitize_target(target)
     is_win = platform.system().lower() == "windows"
     cmd = (
         ["ping", "-n", str(count), "-w", str(timeout_ms), target]
@@ -34,6 +46,8 @@ def run_ping(target: str, count: int = 4, timeout_ms: int = 1000) -> PingRespons
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=count * 3)
         raw_output = proc.stdout
+    except subprocess.TimeoutExpired as e:
+        raw_output = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "Ping timed out.")
     except Exception as e:
         return PingResponse(
             target=target,
@@ -43,9 +57,6 @@ def run_ping(target: str, count: int = 4, timeout_ms: int = 1000) -> PingRespons
             raw_output=f"Error executing ping: {str(e)}"
         )
 
-    # Parse Windows ping output
-    # Example: "Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)"
-    # "Minimum = 12ms, Maximum = 15ms, Average = 13ms"
     sent = count
     received = 0
     loss_pct = 100.0
@@ -67,7 +78,6 @@ def run_ping(target: str, count: int = 4, timeout_ms: int = 1000) -> PingRespons
             max_rtt = float(rtt_match.group(2))
             avg_rtt = float(rtt_match.group(3))
 
-        # Extract individual response times: "time=14ms" or "time<1ms"
         times = re.findall(r"time[<=](\d+)ms", raw_output)
         history = [float(t) for t in times]
     else:
@@ -102,11 +112,10 @@ def run_dns_lookup(domain: str, record_type: str = "ALL", custom_server: Optiona
     """
     Resolves domain records across A, AAAA, MX, NS, CNAME, TXT record types.
     """
-    if not re.match(r"^[a-zA-Z0-9\.\-_]+$", domain):
-        raise ValueError("Invalid domain name format")
-
+    domain = sanitize_target(domain)
     resolver = dns.resolver.Resolver()
     if custom_server:
+        custom_server = sanitize_target(custom_server)
         resolver.nameservers = [custom_server]
 
     resolved_by = custom_server or (resolver.nameservers[0] if resolver.nameservers else "Default System DNS")
@@ -138,10 +147,9 @@ def run_dns_lookup(domain: str, record_type: str = "ALL", custom_server: Optiona
 def run_traceroute(target: str, max_hops: int = 15, timeout_ms: int = 1500) -> TracerouteResponse:
     """
     Executes hop-by-hop traceroute using tracert (Windows) or traceroute (Linux).
+    Handles timeouts gracefully without dropping partial hops.
     """
-    if not re.match(r"^[a-zA-Z0-9\.\-_:]+$", target):
-        raise ValueError("Invalid target format for traceroute")
-
+    target = sanitize_target(target)
     is_win = platform.system().lower() == "windows"
     cmd = (
         ["tracert", "-d", "-h", str(max_hops), "-w", str(timeout_ms), target]
@@ -150,17 +158,18 @@ def run_traceroute(target: str, max_hops: int = 15, timeout_ms: int = 1500) -> T
     )
 
     hops: List[TracerouteHop] = []
+    raw_output = ""
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max_hops * 3)
         raw_output = proc.stdout
+    except subprocess.TimeoutExpired as e:
+        raw_output = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
     except Exception:
         raw_output = ""
 
     for line in raw_output.splitlines():
         line = line.strip()
-        # Windows match: e.g. "  1    <1 ms    <1 ms    <1 ms  192.168.1.254"
-        # or "  3     *        *        *     Request timed out."
         hop_match = re.match(r"^\s*(\d+)\s+(.+)", line)
         if hop_match:
             hop_num = int(hop_match.group(1))
@@ -172,7 +181,6 @@ def run_traceroute(target: str, max_hops: int = 15, timeout_ms: int = 1500) -> T
                 ip_match = re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", rest)
                 ip_addr = ip_match.group(1) if ip_match else None
 
-                # Extract first numeric latency
                 ms_match = re.search(r"(\d+)\s*ms", rest)
                 rtt = float(ms_match.group(1)) if ms_match else None
 
@@ -210,7 +218,6 @@ def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
     netmask_str = str(net.netmask) if is_ipv4 else "N/A"
     bcast_str = str(net.broadcast_address) if is_ipv4 and net.num_addresses > 1 else None
 
-    # Usable host range
     hosts = list(net.hosts()) if net.num_addresses <= 65536 else []
     if hosts:
         usable_range = [str(hosts[0]), str(hosts[-1])]
@@ -219,7 +226,6 @@ def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
         usable_range = [str(net.network_address), str(net.network_address)]
         usable_count = 1
 
-    # Binary string representation
     if is_ipv4:
         binary_rep = ".".join(f"{int(octet):08b}" for octet in str(addr).split("."))
     else:
@@ -238,3 +244,72 @@ def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
         is_loopback=net.is_loopback,
         binary_representation=binary_rep
     )
+
+def run_connectivity_test() -> Dict[str, Any]:
+    """
+    Executes a comprehensive 3-step connectivity benchmark:
+    1. DNS resolution test (resolves google.com)
+    2. Local gateway reachability test
+    3. Global internet ping test (1.1.1.1)
+    Returns structured results and diagnosis verdict.
+    """
+    start = time.perf_counter()
+    gw_ip = get_default_gateway() or "192.168.1.1"
+
+    # Step 1: DNS Test
+    dns_ok = False
+    dns_time_ms = None
+    try:
+        dns_res = run_dns_lookup("google.com", "A")
+        if dns_res.records.get("A"):
+            dns_ok = True
+            dns_time_ms = dns_res.query_time_ms
+    except Exception:
+        pass
+
+    # Step 2: Gateway Reachability
+    gw_ok = False
+    gw_time_ms = None
+    try:
+        gw_ping = run_ping(gw_ip, count=2, timeout_ms=500)
+        if gw_ping.packets_received > 0:
+            gw_ok = True
+            gw_time_ms = gw_ping.avg_rtt_ms
+    except Exception:
+        pass
+
+    # Step 3: Public Internet Ping
+    inet_ok = False
+    inet_time_ms = None
+    try:
+        inet_ping = run_ping("1.1.1.1", count=2, timeout_ms=1000)
+        if inet_ping.packets_received > 0:
+            inet_ok = True
+            inet_time_ms = inet_ping.avg_rtt_ms
+    except Exception:
+        pass
+
+    total_time = round((time.perf_counter() - start) * 1000, 2)
+
+    # Determine Verdict
+    if dns_ok and gw_ok and inet_ok:
+        verdict = "HEALTHY"
+        summary = "All network tiers operating optimally: DNS resolution, local router hop, and Internet WAN uplink confirmed."
+    elif gw_ok and not inet_ok:
+        verdict = "LOCAL_ONLY"
+        summary = "Local gateway router reachable, but external Internet WAN uplink failed or is blocked."
+    elif not gw_ok and inet_ok:
+        verdict = "DEGRADED"
+        summary = "Internet reachable, but default gateway does not respond to ICMP ping (may have ICMP disabled)."
+    else:
+        verdict = "OFFLINE"
+        summary = "No connectivity detected. Check Wi-Fi/Ethernet cable and local router power."
+
+    return {
+        "verdict": verdict,
+        "summary": summary,
+        "dns": {"ok": dns_ok, "latency_ms": dns_time_ms, "tested_domain": "google.com"},
+        "gateway": {"ok": gw_ok, "latency_ms": gw_time_ms, "gateway_ip": gw_ip},
+        "internet": {"ok": inet_ok, "latency_ms": inet_time_ms, "tested_target": "1.1.1.1"},
+        "benchmark_duration_ms": total_time
+    }

@@ -20,6 +20,7 @@
 [🚀 Quick Start](#-quick-start-guide) •
 [📐 Architecture](#-system-architecture) •
 [🛡️ Security Guardrails](#️-security-guardrails--permissions) •
+[📋 QA & Security Reports](#-qa-security--technical-documentation) •
 [📊 API Documentation](#-rest--websocket-api-reference)
 
 ---
@@ -130,14 +131,33 @@ cd backend
 .\.venv\Scripts\pytest.exe tests/ -v
 ```
 
-### Verified Test Results:
-- `test_health_endpoint`: **PASSED** (Verifies FastAPI lifespan and SQLite connectivity).
-- `test_interfaces_endpoint`: **PASSED** (Verifies physical/virtual NIC enumeration).
+### Verified Test Results (12 / 12 Passed):
+- `test_health_endpoint`: **PASSED** (Verifies FastAPI lifespan and SQLite WAL connectivity).
+- `test_interfaces_endpoint`: **PASSED** (Verifies physical/virtual NIC enumeration via psutil).
 - `test_overview_endpoint`: **PASSED** (Verifies health score calculation and gateway routing).
-- `test_ip_info_calculator`: **PASSED** (Verifies IPv4 CIDR binary decomposition and usable host range).
-- `test_port_scan_unauthorized_rejected`: **PASSED** (Verifies HTTP 403 Forbidden when unauthorized).
-- `test_port_scan_authorized_loopback`: **PASSED** (Verifies socket connect scanner on 127.0.0.1).
-- `test_security_findings_endpoint`: **PASSED** (Verifies security rule evaluation and severity categorization).
+- `test_ip_calc_endpoint`: **PASSED** (Verifies IPv4 CIDR binary decomposition and usable host range).
+- `test_port_scan_unauthorized_rejection`: **PASSED** (Verifies HTTP 403 Forbidden when unauthorized).
+- `test_port_scan_authorized_loopback`: **PASSED** (Verifies socket connect scanner on 127.0.0.1:8000).
+- `test_security_findings_endpoint`: **PASSED** (Verifies security rule evaluation SEC-001 through SEC-009).
+- `test_discovery_stop_and_progress`: **PASSED** (Verifies scan cancellation token and async progress reporting).
+- `test_connectivity_benchmark_endpoint`: **PASSED** (Verifies 4-tier network benchmark execution).
+- `test_command_injection_rejection`: **PASSED** (Verifies shell metacharacter rejection with HTTP 422).
+- `test_history_endpoint`: **PASSED** (Verifies persistent SQLite audit trail retrieval).
+- `test_metric_history_endpoint`: **PASSED** (Verifies time-series telemetry storage for Recharts).
+
+---
+
+## 📋 QA, Security & Technical Documentation
+
+For in-depth architectural and validation reports, refer to the documentation suite in `docs/`:
+- [Architecture Blueprint](docs/ARCHITECTURE.md)
+- [API Design Specification](docs/API_DESIGN.md)
+- [Database Schema (SQLAlchemy + Alembic)](docs/DATABASE_SCHEMA.md)
+- [Development Plan & Roadmap](docs/DEVELOPMENT_PLAN.md)
+- [Comprehensive QA Report](docs/QA_REPORT.md)
+- [Application Security Audit](docs/SECURITY_AUDIT.md)
+- [Automated Test Execution Log](docs/TEST_RESULTS.md)
+- [Technical Limitations & OS Boundaries](docs/KNOWN_LIMITATIONS.md)
 
 ---
 

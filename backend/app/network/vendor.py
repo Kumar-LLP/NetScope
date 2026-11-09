@@ -1,6 +1,6 @@
 """
 IEEE OUI Vendor Lookup Module
-Contains common vendor MAC prefixes (first 3 octets / 24 bits)
+Expanded with common vendors for enterprise, consumer, and IoT network hardware.
 """
 import re
 
@@ -25,6 +25,8 @@ OUI_DATABASE = {
     "F4:5C:89": "Apple, Inc.",
     "BC:D0:74": "Apple, Inc.",
     "E4:54:E8": "Apple, Inc.",
+    "DC:A9:04": "Apple, Inc.",
+    "60:F8:1D": "Apple, Inc.",
 
     # Intel
     "00:02:B3": "Intel Corporate",
@@ -43,6 +45,7 @@ OUI_DATABASE = {
     "68:05:CA": "Intel Corporate",
     "80:86:F2": "Intel Corporate",
     "A4:4C:C8": "Intel Corporate",
+    "E0:E2:58": "Intel Corporate",
 
     # TP-Link
     "00:1D:0F": "TP-Link Corporation",
@@ -60,6 +63,7 @@ OUI_DATABASE = {
     "C4:6E:1F": "TP-Link Corporation",
     "E8:48:B8": "TP-Link Corporation",
     "F4:F2:6D": "TP-Link Corporation",
+    "CC:ED:21": "TP-Link Corporation",
 
     # Netgear
     "00:09:5B": "Netgear Inc.",
@@ -149,6 +153,7 @@ OUI_DATABASE = {
     "00:07:0E": "Realtek Semiconductor",
     "00:0A:CD": "Realtek Semiconductor",
     "00:E0:4C": "Realtek Semiconductor",
+    "38:A7:46": "Realtek Semiconductor",
     "52:54:00": "QEMU Virtual NIC / Realtek",
 
     # Samsung
@@ -185,7 +190,62 @@ OUI_DATABASE = {
     "68:37:E9": "Amazon Technologies Inc.",
     "74:75:48": "Amazon Technologies Inc.",
     "AC:63:BE": "Amazon Technologies Inc.",
-    "FC:65:DE": "Amazon Technologies Inc."
+    "FC:65:DE": "Amazon Technologies Inc.",
+
+    # Ubiquiti / UniFi
+    "00:27:22": "Ubiquiti Networks",
+    "04:18:D6": "Ubiquiti Networks",
+    "24:A4:3C": "Ubiquiti Networks",
+    "68:D7:9A": "Ubiquiti Networks",
+    "78:8A:20": "Ubiquiti Networks",
+    "B4:FB:E4": "Ubiquiti Networks",
+    "F0:9F:C2": "Ubiquiti Networks",
+
+    # Espressif / IoT (ESP32, ESP8266)
+    "24:0A:C4": "Espressif Inc.",
+    "24:62:AB": "Espressif Inc.",
+    "30:AE:A4": "Espressif Inc.",
+    "84:F3:EB": "Espressif Inc.",
+    "A4:CF:12": "Espressif Inc.",
+    "C4:4F:33": "Espressif Inc.",
+
+    # Tuya Smart IoT
+    "D8:1F:12": "Tuya Smart Inc.",
+    "10:D5:61": "Tuya Smart Inc.",
+
+    # Synology & QNAP NAS
+    "00:11:32": "Synology Inc.",
+    "00:08:9B": "QNAP Systems, Inc.",
+
+    # Sony / PlayStation
+    "00:04:1F": "Sony Corporation",
+    "00:13:15": "Sony Interactive Entertainment",
+    "70:9E:29": "Sony Interactive Entertainment",
+    "F8:46:1C": "Sony Interactive Entertainment",
+
+    # Nintendo
+    "00:1F:32": "Nintendo Co., Ltd.",
+    "34:AF:2C": "Nintendo Co., Ltd.",
+    "70:48:0F": "Nintendo Co., Ltd.",
+    "98:B6:E9": "Nintendo Co., Ltd.",
+
+    # LG Electronics
+    "00:1C:62": "LG Electronics",
+    "10:F9:6F": "LG Electronics",
+    "58:A2:B5": "LG Electronics",
+    "CC:2D:8C": "LG Electronics",
+
+    # Sonos
+    "00:0E:58": "Sonos, Inc.",
+    "5C:AA:FD": "Sonos, Inc.",
+    "B8:E9:37": "Sonos, Inc.",
+
+    # Virtualization (VirtualBox, VMware, QEMU)
+    "08:00:27": "Oracle VirtualBox",
+    "0A:00:27": "Oracle VirtualBox Host Adapter",
+    "00:05:69": "VMware, Inc.",
+    "00:0C:29": "VMware, Inc.",
+    "00:50:56": "VMware, Inc."
 }
 
 def lookup_vendor(mac_address: str | None) -> str:
@@ -195,11 +255,10 @@ def lookup_vendor(mac_address: str | None) -> str:
     """
     if not mac_address:
         return "Unknown"
-    
-    # Normalize: strip separators and uppercase
+
     clean_mac = re.sub(r"[^0-9A-Fa-f]", "", mac_address).upper()
     if len(clean_mac) < 6:
         return "Unknown"
-    
+
     prefix = f"{clean_mac[0:2]}:{clean_mac[2:4]}:{clean_mac[4:6]}"
     return OUI_DATABASE.get(prefix, "Generic Network Device")

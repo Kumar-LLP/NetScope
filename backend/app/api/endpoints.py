@@ -1,7 +1,8 @@
 import platform
 import asyncio
+import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -32,6 +33,7 @@ from app.models.entities import (
     NetworkDeviceModel,
     NetworkScanModel,
     ScanResultModel,
+    NetworkMetricModel,
     PingResultModel,
     DNSResultModel,
     PortDiagnosticModel,
@@ -40,16 +42,16 @@ from app.models.entities import (
 )
 from app.network.interfaces import get_network_interfaces, get_active_interface_ip, calculate_cidr
 from app.network.gateway import get_default_gateway, get_gateway_mac, get_dns_servers, get_public_ip, measure_target_latency
-from app.network.discovery import discover_devices
+from app.network.discovery import discover_devices, stop_discovery, get_discovery_progress
 from app.network.topology import generate_topology
-from app.network.diagnostics import run_ping, run_dns_lookup, run_traceroute, calculate_ip_info
+from app.network.diagnostics import run_ping, run_dns_lookup, run_traceroute, calculate_ip_info, run_connectivity_test
 from app.network.ports import run_port_scan
 from app.monitoring.traffic import traffic_monitor, calculate_health_score
 from app.security.auditor import security_auditor
 
 router = APIRouter()
 
-# Memory cache for latest discovered devices
+# Memory cache for latest discovered devices & open ports
 _cached_devices: List[DeviceSchema] = []
 _last_open_ports: List[dict] = []
 
@@ -91,12 +93,10 @@ async def get_overview():
     dns_list = get_dns_servers()
     pub_ip = await get_public_ip()
 
-    # Latency to gateway or public DNS
     latency = measure_target_latency(gw or "1.1.1.1", port=53, timeout_sec=0.5)
     loss = 0.0 if latency is not None else 100.0
     health = calculate_health_score(latency, loss)
 
-    # Throughput from traffic monitor
     down_kbps = 0.0
     up_kbps = 0.0
     if traffic_monitor.latest_telemetry:
@@ -126,9 +126,31 @@ async def get_recent_metrics():
     """Returns the sliding-window buffer of recent throughput and latency measurements."""
     return {"metrics": traffic_monitor.history}
 
+@router.get("/network/metrics/history")
+async def get_historical_database_metrics(
+    limit: int = Query(default=50, ge=1, le=500),
+    db: AsyncSession = Depends(get_db)
+):
+    """Fetches persistent network metric records from SQLite."""
+    res = await db.execute(
+        select(NetworkMetricModel).order_by(NetworkMetricModel.timestamp.desc()).limit(limit)
+    )
+    records = res.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "download_kbps": round(r.download_bytes_sec / 1024.0, 2),
+            "upload_kbps": round(r.upload_bytes_sec / 1024.0, 2),
+            "latency_ms": r.latency_ms,
+            "packet_loss_pct": r.packet_loss_pct,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None
+        }
+        for r in records
+    ]
+
 @router.post("/devices/discover", response_model=DeviceDiscoverResponse)
 async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depends(get_db)):
-    """Triggers safe local subnet discovery and persists identified devices."""
+    """Triggers safe local subnet discovery and persists identified devices and scan results."""
     global _cached_devices
     result = await discover_devices(
         target_cidr=payload.cidr,
@@ -149,13 +171,13 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
         )
         db.add(scan_record)
 
-        # Upsert discovered devices
+        # Upsert discovered devices and record ScanResultModel rows
         for dev in result.devices:
-            # Check existing device by IP or MAC
             query = select(NetworkDeviceModel).where(NetworkDeviceModel.ip_address == dev.ip)
             res = await db.execute(query)
             existing = res.scalars().first()
 
+            device_id = None
             if existing:
                 existing.mac_address = dev.mac or existing.mac_address
                 existing.vendor = dev.vendor or existing.vendor
@@ -163,6 +185,7 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
                 existing.is_gateway = dev.is_gateway
                 existing.is_local_host = dev.is_local_host
                 existing.last_seen = datetime.now(timezone.utc)
+                device_id = existing.id
             else:
                 new_dev = NetworkDeviceModel(
                     ip_address=dev.ip,
@@ -174,12 +197,34 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
                     status="online"
                 )
                 db.add(new_dev)
+                await db.flush()
+                device_id = new_dev.id
+
+            scan_item = ScanResultModel(
+                scan_id=result.scan_id,
+                device_id=device_id,
+                ip_address=dev.ip,
+                mac_address=dev.mac,
+                response_time_ms=dev.response_time_ms
+            )
+            db.add(scan_item)
 
         await db.commit()
     except Exception:
         await db.rollback()
 
     return result
+
+@router.post("/devices/scan/stop")
+async def stop_running_discovery():
+    """Signals any currently running subnet discovery sweep to cancel gracefully."""
+    stop_discovery()
+    return {"status": "stopped", "message": "Discovery sweep cancellation signal sent."}
+
+@router.get("/devices/scan/progress")
+async def get_scan_progress():
+    """Returns live progress indicators for a running subnet sweep."""
+    return get_discovery_progress()
 
 @router.get("/devices", response_model=List[DeviceSchema])
 async def list_devices(db: AsyncSession = Depends(get_db)):
@@ -188,7 +233,6 @@ async def list_devices(db: AsyncSession = Depends(get_db)):
     if _cached_devices:
         return _cached_devices
 
-    # Fallback to database
     res = await db.execute(select(NetworkDeviceModel))
     db_devs = res.scalars().all()
     return [
@@ -212,7 +256,6 @@ async def get_network_topology():
     """Generates an interactive React Flow network topology graph."""
     global _cached_devices
     if not _cached_devices:
-        # Quick initial discovery if empty
         disc = await discover_devices(timeout_seconds=5)
         _cached_devices = disc.devices
 
@@ -223,7 +266,6 @@ async def ping_endpoint(payload: PingRequest, db: AsyncSession = Depends(get_db)
     """Executes genuine ICMP ping test and logs audit record."""
     try:
         res = await asyncio.to_thread(run_ping, payload.target, payload.count, payload.timeout_ms)
-        # Log to DB
         audit = PingResultModel(
             target=payload.target,
             packets_sent=res.packets_transmitted,
@@ -274,6 +316,11 @@ async def ip_info_endpoint(payload: IPInfoRequest):
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
+@router.post("/diagnostics/connectivity")
+async def connectivity_test_endpoint():
+    """Executes multi-tier automated connectivity benchmark (DNS, Gateway, Internet)."""
+    return await asyncio.to_thread(run_connectivity_test)
+
 @router.post("/diagnostics/ports", response_model=PortScanResponse)
 async def port_scan_endpoint(payload: PortScanRequest, db: AsyncSession = Depends(get_db)):
     """Controlled multi-threaded TCP port scan with target authorization."""
@@ -282,6 +329,9 @@ async def port_scan_endpoint(payload: PortScanRequest, db: AsyncSession = Depend
         raise HTTPException(status_code=403, detail="Target authorization must be explicitly confirmed.")
 
     try:
+        scan_id = str(uuid.uuid4())[:8]
+        start_time = datetime.now(timezone.utc)
+
         res = await run_port_scan(
             target=payload.target,
             ports=payload.ports,
@@ -289,16 +339,28 @@ async def port_scan_endpoint(payload: PortScanRequest, db: AsyncSession = Depend
             authorized=payload.authorized
         )
 
-        # Cache open ports for security auditor
         open_list = [
             {"port": r.port, "target": payload.target, "service": r.service}
             for r in res.results if r.state == "open"
         ]
         _last_open_ports = open_list
 
-        # Log open ports to DB
+        # Record scan metadata in network_scans
+        scan_record = NetworkScanModel(
+            id=scan_id,
+            scan_type="port_scan",
+            target_range=f"{payload.target}:{len(payload.ports)} ports",
+            status="completed",
+            total_targets=len(payload.ports),
+            found_targets=res.open_count,
+            duration_seconds=0.5
+        )
+        db.add(scan_record)
+
+        # Log individual port results linked to scan_id
         for r in res.results:
             audit = PortDiagnosticModel(
+                scan_id=scan_id,
                 target_ip=payload.target,
                 port=r.port,
                 state=r.state,
@@ -324,7 +386,7 @@ async def list_security_findings():
 @router.get("/history")
 async def get_scan_history(db: AsyncSession = Depends(get_db)):
     """Retrieves previous network scan operations from the database."""
-    res = await db.execute(select(NetworkScanModel).order_by(NetworkScanModel.created_at.desc()).limit(20))
+    res = await db.execute(select(NetworkScanModel).order_by(NetworkScanModel.created_at.desc()).limit(25))
     scans = res.scalars().all()
     return [
         {
