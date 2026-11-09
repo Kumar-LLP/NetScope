@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background-color: #0B0F17;
+    color: #F1F5F9;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', Consolas, monospace;
+  }
+}
+
+/* Custom Cyberpunk / Dark NOC scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0B0F17;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1E293B;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* React Flow custom styling overrides for dark cybersecurity theme */
+.react-flow__pane {
+  background: #0B0F17 !important;
+}
+
+.react-flow__controls {
+  background: #111827 !important;
+  border: 1px solid #1E293B !important;
+  border-radius: 8px !important;
+}
+
+.react-flow__controls button {
+  background: #111827 !important;
+  border-bottom: 1px solid #1E293B !important;
+  color: #94A3B8 !important;
+}
+
+.react-flow__controls button:hover {
+  background: #1E293B !important;
+  color: #38BDF8 !important;
+}
+
+.react-flow__minimap {
+  background: #111827 !important;
+  border: 1px solid #1E293B !important;
+  border-radius: 8px !important;
+}
+
+/* Subtle glow utilities */
+.glow-cyan {
+  box-shadow: 0 0 15px -3px rgba(6, 182, 212, 0.25);
+}
+
+.glow-emerald {
+  box-shadow: 0 0 15px -3px rgba(16, 185, 129, 0.25);
+}
+
+.glow-blue {
+  box-shadow: 0 0 15px -3px rgba(56, 189, 248, 0.25);
+}
+
+.glow-rose {
+  box-shadow: 0 0 15px -3px rgba(244, 63, 94, 0.25);
+}

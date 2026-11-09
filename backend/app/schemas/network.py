@@ -1,0 +1,193 @@
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
+from datetime import datetime
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    platform: str
+    db_connected: bool
+    timestamp: datetime
+
+class InterfaceSchema(BaseModel):
+    name: str
+    ip_address: Optional[str] = None
+    netmask: Optional[str] = None
+    broadcast: Optional[str] = None
+    mac_address: Optional[str] = None
+    is_up: bool = True
+    speed_mbps: Optional[int] = None
+    is_default: bool = False
+
+class OverviewResponse(BaseModel):
+    active_interface: str
+    local_ip: str
+    public_ip: Optional[str] = None
+    subnet_mask: str
+    cidr: str
+    default_gateway: Optional[str] = None
+    gateway_mac: Optional[str] = None
+    dns_servers: List[str] = []
+    internet_connected: bool = True
+    current_latency_ms: Optional[float] = None
+    packet_loss_pct: float = 0.0
+    download_kbps: float = 0.0
+    upload_kbps: float = 0.0
+    health_score: int = 100
+    connected_devices_count: int = 0
+
+class DeviceDiscoverRequest(BaseModel):
+    cidr: Optional[str] = None
+    timeout_seconds: Optional[int] = Field(default=10, ge=1, le=60)
+
+class DeviceSchema(BaseModel):
+    id: Optional[int] = None
+    ip: str
+    mac: Optional[str] = None
+    vendor: str = "Unknown"
+    hostname: Optional[str] = None
+    is_gateway: bool = False
+    is_local_host: bool = False
+    status: str = "online"
+    response_time_ms: Optional[float] = None
+    first_seen: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
+
+class DeviceDiscoverResponse(BaseModel):
+    scan_id: str
+    total_discovered: int
+    duration_seconds: float
+    devices: List[DeviceSchema]
+
+class TopologyNodeData(BaseModel):
+    label: str
+    subLabel: Optional[str] = None
+    ip: Optional[str] = None
+    mac: Optional[str] = None
+    vendor: Optional[str] = None
+    status: str = "online"
+    nodeType: str # 'internet', 'gateway', 'host', 'device', 'dns'
+
+class TopologyNode(BaseModel):
+    id: str
+    type: str = "customNode"
+    data: TopologyNodeData
+    position: Dict[str, float]
+
+class TopologyEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    animated: bool = True
+    style: Optional[Dict[str, Any]] = None
+
+class TopologyResponse(BaseModel):
+    nodes: List[TopologyNode]
+    edges: List[TopologyEdge]
+
+class PingRequest(BaseModel):
+    target: str = Field(..., min_length=1, max_length=255)
+    count: int = Field(default=4, ge=1, le=10)
+    timeout_ms: int = Field(default=1000, ge=200, le=5000)
+
+class PingResponse(BaseModel):
+    target: str
+    packets_transmitted: int
+    packets_received: int
+    packet_loss_pct: float
+    min_rtt_ms: Optional[float] = None
+    avg_rtt_ms: Optional[float] = None
+    max_rtt_ms: Optional[float] = None
+    history: List[float] = []
+    raw_output: Optional[str] = None
+
+class DNSRequest(BaseModel):
+    domain: str = Field(..., min_length=1, max_length=255)
+    record_type: str = Field(default="ALL")
+    custom_server: Optional[str] = None
+
+class DNSResponse(BaseModel):
+    domain: str
+    resolved_by: str
+    records: Dict[str, List[str]]
+    query_time_ms: float
+
+class TracerouteRequest(BaseModel):
+    target: str = Field(..., min_length=1, max_length=255)
+    max_hops: int = Field(default=15, ge=1, le=30)
+    timeout_ms: int = Field(default=1500, ge=500, le=5000)
+
+class TracerouteHop(BaseModel):
+    hop: int
+    ip: Optional[str] = None
+    hostname: Optional[str] = None
+    rtt_ms: Optional[float] = None
+    timed_out: bool = False
+
+class TracerouteResponse(BaseModel):
+    target: str
+    total_hops: int
+    hops: List[TracerouteHop]
+
+class IPInfoRequest(BaseModel):
+    ip_or_cidr: str = Field(..., min_length=3, max_length=45)
+
+class IPInfoResponse(BaseModel):
+    input: str
+    ip_version: int
+    network_address: str
+    netmask: str
+    broadcast_address: Optional[str] = None
+    usable_host_range: List[str]
+    total_hosts: int
+    usable_hosts: int
+    is_private: bool
+    is_loopback: bool
+    binary_representation: str
+
+class PortScanRequest(BaseModel):
+    target: str = Field(..., min_length=1, max_length=255)
+    ports: List[int] = Field(..., min_length=1, max_length=100)
+    timeout_ms: int = Field(default=500, ge=100, le=3000)
+    authorized: bool = Field(default=False)
+
+class PortResult(BaseModel):
+    port: int
+    state: str # 'open', 'closed', 'filtered'
+    service: Optional[str] = None
+    banner: Optional[str] = None
+    rtt_ms: Optional[float] = None
+
+class PortScanResponse(BaseModel):
+    target: str
+    total_scanned: int
+    open_count: int
+    results: List[PortResult]
+
+class SecurityFindingSchema(BaseModel):
+    id: Optional[int] = None
+    rule_id: str
+    severity: str # 'critical', 'high', 'medium', 'low', 'info'
+    title: str
+    category: str
+    description: str
+    evidence: str
+    impact: str
+    remediation: str
+    status: str = "active"
+    created_at: Optional[datetime] = None
+
+class TelemetryBandwidth(BaseModel):
+    download_bytes_per_sec: float
+    upload_bytes_per_sec: float
+    download_formatted: str
+    upload_formatted: str
+
+class TelemetryMessage(BaseModel):
+    type: str = "telemetry_update"
+    timestamp: str
+    bandwidth: TelemetryBandwidth
+    ping_ms: Optional[float] = None
+    packet_loss_pct: float = 0.0
+    interface: str
+    is_connected: bool
