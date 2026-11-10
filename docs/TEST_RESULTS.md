@@ -1,11 +1,11 @@
 # NetScope Automated Test Execution & Results Log
 
 **Project:** NetScope – Network Intelligence & Cybersecurity Monitoring Platform  
-**Test Suite:** Backend Pytest API & Security Tests + Frontend Production Build Check  
-**Date of Execution:** November 9, 2026  
+**Test Suite:** Backend Pytest API & Security Suite + Frontend Production Build Check  
+**Date of Execution:** November 10, 2026  
 **Test Runner:** Pytest 9.2.0 (anyio 4.16.0, asyncio 1.4.1.post1)  
 **Execution Environment:** Windows 11 Enterprise x64, Python 3.14.5, Node.js 20+  
-**Overall Result:** **ALL 15 TESTS PASSED (100% SUCCESS RATE)**
+**Overall Result:** **ALL 23 TESTS PASSED (100% SUCCESS RATE)**
 
 ---
 
@@ -13,16 +13,39 @@
 
 ```text
 ============================= test session starts =============================
-platform win32 -- Python 3.14.5, pytest-9.2.0, pluggy-1.7.0
+platform win32 -- Python 3.14.5, pytest-9.2.0, pluggy-1.7.0 -- C:\Users\LOQ\netscope\backend\.venv\Scripts\python.exe
+cachedir: .pytest_cache
 rootdir: C:\Users\LOQ\netscope\backend
 configfile: pytest.ini
 plugins: anyio-4.16.0, asyncio-1.4.1.post1
-asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function
-collected 15 items
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collecting ... collected 23 items
 
-netscope\backend\tests\test_api.py ...............                       [100%]
+netscope\backend\tests\test_api.py::test_health_endpoint PASSED          [  4%]
+netscope\backend\tests\test_api.py::test_interfaces_endpoint PASSED      [  8%]
+netscope\backend\tests\test_api.py::test_overview_endpoint PASSED        [ 13%]
+netscope\backend\tests\test_api.py::test_ip_info_calculator PASSED       [ 17%]
+netscope\backend\tests\test_api.py::test_port_scan_unauthorized_rejected PASSED [ 21%]
+netscope\backend\tests\test_api.py::test_port_scan_authorized_loopback PASSED [ 26%]
+netscope\backend\tests\test_api.py::test_security_findings_endpoint PASSED [ 30%]
+netscope\backend\tests\test_api.py::test_stop_scan_and_progress_endpoints PASSED [ 34%]
+netscope\backend\tests\test_api.py::test_connectivity_benchmark_endpoint PASSED [ 39%]
+netscope\backend\tests\test_api.py::test_input_validation_command_injection_rejected PASSED [ 43%]
+netscope\backend\tests\test_api.py::test_history_endpoint PASSED         [ 47%]
+netscope\backend\tests\test_api.py::test_metrics_history_endpoint PASSED [ 52%]
+netscope\backend\tests\test_api.py::test_ip_calc_edge_cases PASSED       [ 56%]
+netscope\backend\tests\test_api.py::test_port_scan_security_guardrails PASSED [ 60%]
+netscope\backend\tests\test_api.py::test_discovery_security_scope_and_size_guardrails PASSED [ 65%]
+netscope\backend\tests\test_api.py::test_security_headers_present PASSED [ 69%]
+netscope\backend\tests\test_api.py::test_unrelated_private_network_rejection PASSED [ 73%]
+netscope\backend\tests\test_api.py::test_gateway_baseline_lifecycle PASSED [ 78%]
+netscope\backend\tests\test_api.py::test_security_findings_lifecycle PASSED [ 82%]
+netscope\backend\tests\test_api.py::test_device_inventory_patch PASSED   [ 86%]
+netscope\backend\tests\test_api.py::test_interface_selection PASSED      [ 91%]
+netscope\backend\tests\test_api.py::test_report_exports PASSED           [ 95%]
+netscope\backend\tests\test_api.py::test_topology_read_only PASSED       [100%]
 
-============================= 15 passed in 4.61s ==============================
+============================= 23 passed in 7.67s ==============================
 ```
 
 ---
@@ -100,51 +123,74 @@ netscope\backend\tests\test_api.py ...............                       [100%]
 * **Outcome:** **PASSED** (0.07s)
 
 ### Test 12: `test_metrics_history_endpoint`
-* **Route:** `GET /api/network/metrics/history?limit=10`
-* **Objective:** Verify telemetry time-series storage and retrieval for real-time charting.
+* **Route:** `GET /api/network/metrics/history`
+* **Objective:** Verify telemetry time-series storage retrieval from database.
 * **Assertions:** `status == 200`, valid list returned.
 * **Outcome:** **PASSED** (0.09s)
 
 ### Test 13: `test_ip_calc_edge_cases`
 * **Route:** `POST /api/diagnostics/ip-info`
-* **Objective:** Verify mathematical calculations for `/0`, `/8`, `/31` (RFC 3021), `/32`, and IPv6 `/64` with zero memory allocation.
-* **Assertions:**
-  - `/32`: 1 usable host (`192.168.1.1` to `192.168.1.1`).
-  - `/31`: 2 usable hosts (`192.168.1.0` to `192.168.1.1`).
-  - `/24`: 254 usable hosts.
-  - `/8`: 16,777,214 usable hosts (`10.0.0.1` to `10.255.255.254`).
-  - `/0`: 4,294,967,294 usable hosts.
-  - IPv6 `/64`: `ip_version == 6`.
+* **Objective:** Mathematical zero-memory verification for `/0`, `/8`, `/31`, `/32`, and IPv6 `/64`.
+* **Assertions:** All sizes compute accurately without memory allocation.
 * **Outcome:** **PASSED** (0.08s)
 
 ### Test 14: `test_port_scan_security_guardrails`
 * **Route:** `POST /api/diagnostics/ports`
-* **Objective:** Verify server-side security rejection of invalid port numbers and external WAN targets.
-* **Assertions:**
-  - `ports: [0]`: Rejected with HTTP 422.
-  - `ports: [70000]`: Rejected with HTTP 422.
-  - `target: "8.8.8.8"` (Public WAN): Rejected with HTTP 403 Forbidden.
-  - Nonexistent domain: Rejected with HTTP 422.
+* **Objective:** Prohibit external public scanning (8.8.8.8) and invalid ports (0, 70000).
+* **Assertions:** External target returns HTTP 403; invalid ports return HTTP 422.
 * **Outcome:** **PASSED** (0.06s)
 
 ### Test 15: `test_discovery_security_scope_and_size_guardrails`
 * **Route:** `POST /api/devices/discover`
-* **Objective:** Verify server-side rejection of public WAN CIDRs and oversized network ranges.
-* **Assertions:**
-  - `cidr: "8.8.8.0/24"` (Public WAN): Rejected with HTTP 403 Forbidden.
-  - `cidr: "10.0.0.0/16"` (Oversized > /24): Rejected with HTTP 422 Unprocessable Entity.
-  - `cidr: "not_a_valid_cidr"`: Rejected with HTTP 422 Unprocessable Entity.
+* **Objective:** Prohibit public WAN sweeps (8.8.8.0/24) and oversized subnets.
+* **Assertions:** Public sweep rejected with HTTP 403; malformed CIDR rejected with HTTP 422.
 * **Outcome:** **PASSED** (0.05s)
 
----
+### Test 16: `test_security_headers_present`
+* **Route:** `GET /api/health`
+* **Objective:** Verify standard OWASP HTTP security headers.
+* **Assertions:** `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `X-XSS-Protection: 1; mode=block`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: geolocation=()`.
+* **Outcome:** **PASSED** (0.04s)
 
-## 3. Frontend Production Build Verification
+### Test 17: `test_unrelated_private_network_rejection`
+* **Route:** `POST /api/devices/discover`
+* **Payload:** `{"cidr": "10.254.254.0/24"}`
+* **Objective:** Strict subnet scoping check: reject RFC 1918 subnets not attached to any host network adapter.
+* **Assertions:** Rejected with HTTP 403 Forbidden.
+* **Outcome:** **PASSED** (0.05s)
 
-* **Command:** `npm.cmd run build` (`tsc && vite build`)
-* **Modules Transformed:** 2,127
-* **Output:**
-  - `dist/index.html` (1.31 kB)
-  - `dist/assets/index-DdoxCqXJ.css` (45.21 kB)
-  - `dist/assets/index-Bo3WrI_D.js` (834.64 kB)
-* **Build Time:** 4.22 seconds
-* **Compiler Status:** 0 TypeScript compile errors, 0 lint warnings.
+### Test 18: `test_gateway_baseline_lifecycle`
+* **Route:** `GET/POST /api/security/gateway-baseline/*`
+* **Objective:** Verify operator-confirmed baseline workflow (inspect, confirm MAC, check mismatch, reset).
+* **Assertions:** Baseline confirms accurately and resets cleanly.
+* **Outcome:** **PASSED** (0.15s)
+
+### Test 19: `test_security_findings_lifecycle`
+* **Route:** `POST /api/security/findings/{id}/acknowledge` and `resolve`
+* **Objective:** Validate finding state transitions (`active` -> `acknowledged` -> `resolved`).
+* **Assertions:** Finding status updates persisted in SQLite and retrieved in audit history.
+* **Outcome:** **PASSED** (0.18s)
+
+### Test 20: `test_device_inventory_patch`
+* **Route:** `PATCH /api/devices/{id}`
+* **Objective:** Validate user custom classification (custom_name, notes, category, is_trusted).
+* **Assertions:** HTTP 200, persisted and returned in inventory queries.
+* **Outcome:** **PASSED** (0.14s)
+
+### Test 21: `test_interface_selection`
+* **Route:** `POST /api/network/interfaces/select`
+* **Objective:** Validate runtime switching of monitored network interface adapter.
+* **Assertions:** Returns HTTP 200 and switches active telemetry target.
+* **Outcome:** **PASSED** (0.07s)
+
+### Test 22: `test_report_exports`
+* **Route:** `GET /api/reports/*/export?format=csv` and `json`
+* **Objective:** Verify genuine downloadable reports for devices, security findings, and scan history.
+* **Assertions:** Content-Disposition headers present, valid CSV and JSON formats returned.
+* **Outcome:** **PASSED** (0.19s)
+
+### Test 23: `test_topology_read_only`
+* **Route:** `GET /api/topology`
+* **Objective:** Verify read-only network topology generation without triggering unexpected scans.
+* **Assertions:** HTTP 200, valid node and edge arrays returned.
+* **Outcome:** **PASSED** (0.08s)

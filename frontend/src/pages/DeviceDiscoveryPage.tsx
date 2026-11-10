@@ -15,7 +15,9 @@ import {
   Copy,
   StopCircle,
   Eye,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Check,
+  Tag
 } from 'lucide-react';
 
 interface DeviceDiscoveryPageProps {
@@ -104,39 +106,72 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
     setTimeout(() => setCopiedIp(null), 2000);
   };
 
-  const exportCSV = () => {
-    if (!devices.length) return;
-    const headers = ['IP Address', 'MAC Address', 'Vendor', 'Hostname', 'Role', 'Status', 'Response Time (ms)'];
-    const rows = devices.map((d) => [
-      d.ip,
-      d.mac || 'N/A',
-      `"${d.vendor}"`,
-      d.hostname || 'N/A',
-      d.is_gateway ? 'Gateway' : d.is_local_host ? 'Localhost' : 'Host',
-      d.status,
-      d.response_time_ms ?? 'N/A'
-    ]);
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `netscope-devices-${Date.now()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    addToast('success', 'CSV Exported', `Saved ${devices.length} hosts to CSV file.`);
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
   };
 
-  const exportJSON = () => {
-    if (!devices.length) return;
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(devices, null, 2));
-    const link = document.createElement('a');
-    link.setAttribute('href', dataStr);
-    link.setAttribute('download', `netscope-devices-${Date.now()}.json`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    addToast('success', 'JSON Exported', `Saved ${devices.length} hosts to JSON file.`);
+  const exportCSV = async () => {
+    try {
+      const blob = await api.exportDevices('csv');
+      downloadBlob(blob, `netscope-devices-${Date.now()}.csv`);
+      addToast('success', 'CSV Exported', `Saved ${devices.length} hosts to CSV file.`);
+    } catch (err) {
+      // Fallback
+      if (!devices.length) return;
+      const headers = ['IP Address', 'MAC Address', 'Vendor', 'Hostname', 'Custom Name', 'Category', 'Trusted', 'Role', 'Status', 'Response Time (ms)'];
+      const rows = devices.map((d) => [
+        d.ip,
+        d.mac || 'N/A',
+        `"${d.vendor}"`,
+        d.hostname || 'N/A',
+        `"${d.custom_name || ''}"`,
+        `"${d.category || 'General'}"`,
+        d.is_trusted ? 'Yes' : 'No',
+        d.is_gateway ? 'Gateway' : d.is_local_host ? 'Localhost' : 'Host',
+        d.status,
+        d.response_time_ms ?? 'N/A'
+      ]);
+      const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement('a');
+      link.setAttribute('href', encodedUri);
+      link.setAttribute('download', `netscope-devices-${Date.now()}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      addToast('success', 'CSV Exported', `Saved ${devices.length} hosts to CSV file.`);
+    }
+  };
+
+  const exportJSON = async () => {
+    try {
+      const blob = await api.exportDevices('json');
+      downloadBlob(blob, `netscope-devices-${Date.now()}.json`);
+      addToast('success', 'JSON Exported', `Saved ${devices.length} hosts to JSON file.`);
+    } catch (err) {
+      if (!devices.length) return;
+      const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(devices, null, 2));
+      const link = document.createElement('a');
+      link.setAttribute('href', dataStr);
+      link.setAttribute('download', `netscope-devices-${Date.now()}.json`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      addToast('success', 'JSON Exported', `Saved ${devices.length} hosts to JSON file.`);
+    }
+  };
+
+  const handleDeviceUpdated = (updated: DiscoveredDevice) => {
+    setDevices((prev) => prev.map((d) => (d.id === updated.id || d.ip === updated.ip ? updated : d)));
+    setSelectedDevice(updated);
+    addToast('success', 'Device Saved', `Updated classification for ${updated.ip}.`);
   };
 
   const filtered = devices.filter((d) => {
@@ -145,11 +180,14 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
       d.ip.toLowerCase().includes(q) ||
       (d.mac && d.mac.toLowerCase().includes(q)) ||
       d.vendor.toLowerCase().includes(q) ||
-      (d.hostname && d.hostname.toLowerCase().includes(q))
+      (d.hostname && d.hostname.toLowerCase().includes(q)) ||
+      (d.custom_name && d.custom_name.toLowerCase().includes(q)) ||
+      (d.category && d.category.toLowerCase().includes(q))
     );
   });
 
-  const progressPercent = Math.min(100, Math.round((progress.scanned / Math.max(1, progress.total)) * 100));
+  const progressPercent =
+    progress.total > 0 ? Math.min(100, Math.round((progress.scanned / progress.total) * 100)) : 0;
 
   return (
     <div className="space-y-6">
@@ -157,40 +195,43 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-cyber-border">
         <div>
           <h1 className="text-xl font-bold text-cyber-text tracking-tight flex items-center gap-2">
-            Local Network Device Discovery
-            <Badge variant="emerald">{devices.length} Identified</Badge>
+            Network Device Discovery & Inventory
+            <Badge variant="cyan">{devices.length} Discovered</Badge>
           </h1>
           <p className="text-xs text-cyber-subtext mt-1">
-            Safe non-privileged ARP table inspection and local subnet ping discovery
+            Active ARP scanning and TCP socket sweep across the local network interface
           </p>
         </div>
 
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          <button
-            onClick={exportCSV}
-            disabled={!devices.length}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyber-card border border-cyber-border hover:border-cyber-muted text-xs font-medium text-cyber-text transition-colors disabled:opacity-40"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>CSV</span>
-          </button>
-          <button
-            onClick={exportJSON}
-            disabled={!devices.length}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyber-card border border-cyber-border hover:border-cyber-muted text-xs font-medium text-cyber-text transition-colors disabled:opacity-40"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>JSON</span>
-          </button>
+          <div className="flex items-center gap-1 bg-cyber-card border border-cyber-border rounded-lg p-0.5">
+            <button
+              onClick={exportCSV}
+              disabled={!devices.length}
+              className="px-2.5 py-1 text-xs font-medium text-cyber-subtext hover:text-cyber-cyan transition-colors flex items-center gap-1 disabled:opacity-40"
+              title="Export as CSV"
+            >
+              <Download className="w-3 h-3" /> CSV
+            </button>
+            <span className="text-cyber-border">|</span>
+            <button
+              onClick={exportJSON}
+              disabled={!devices.length}
+              className="px-2.5 py-1 text-xs font-medium text-cyber-subtext hover:text-cyber-cyan transition-colors flex items-center gap-1 disabled:opacity-40"
+              title="Export as JSON"
+            >
+              <Download className="w-3 h-3" /> JSON
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Discovery Control Strip */}
+      {/* Discovery Control Bar */}
       <div className="bg-cyber-card border border-cyber-border rounded-xl p-4 flex flex-col md:flex-row items-center justify-between gap-4">
         <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
           <div className="w-full sm:w-64">
-            <label className="text-[10px] font-mono uppercase text-cyber-subtext mb-1 block">
-              Subnet CIDR Target Range
+            <label className="text-[10px] font-mono text-cyber-subtext uppercase block mb-1">
+              Target Subnet CIDR (Scoped to Host)
             </label>
             <input
               type="text"
@@ -259,7 +300,7 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search by IP, MAC, hostname, or manufacturer..."
+            placeholder="Search by IP, MAC, hostname, custom name, or category..."
             className="w-full bg-cyber-card border border-cyber-border rounded-lg pl-9 pr-3 py-2 text-xs text-cyber-text placeholder:text-slate-500 focus:outline-none focus:border-cyber-cyan"
           />
         </div>
@@ -277,8 +318,9 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
                 <th className="py-3 px-4">IPv4 Address</th>
                 <th className="py-3 px-4">Physical Address (MAC)</th>
                 <th className="py-3 px-4">Vendor / Manufacturer</th>
-                <th className="py-3 px-4">Hostname</th>
+                <th className="py-3 px-4">Device Identity</th>
                 <th className="py-3 px-4">Network Role</th>
+                <th className="py-3 px-4">Category</th>
                 <th className="py-3 px-4">Response Time</th>
                 <th className="py-3 px-4 text-right">Actions</th>
               </tr>
@@ -286,19 +328,26 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
             <tbody className="divide-y divide-cyber-border/60 font-mono">
               {filtered.map((dev, idx) => (
                 <tr
-                  key={idx}
+                  key={dev.id || dev.ip || idx}
                   onClick={() => setSelectedDevice(dev)}
                   className="hover:bg-cyber-surface/80 transition-colors cursor-pointer group"
                 >
-                  <td className="py-3 px-4 text-cyber-cyan font-medium flex items-center gap-2">
-                    {dev.is_gateway ? (
-                      <Router className="w-4 h-4 text-sky-400" />
-                    ) : dev.is_local_host ? (
-                      <Laptop className="w-4 h-4 text-emerald-400" />
-                    ) : (
-                      <Shield className="w-4 h-4 text-slate-400" />
-                    )}
-                    <span>{dev.ip}</span>
+                  <td className="py-3 px-4 text-cyber-cyan font-medium">
+                    <div className="flex items-center gap-2">
+                      {dev.is_gateway ? (
+                        <Router className="w-4 h-4 text-sky-400 flex-shrink-0" />
+                      ) : dev.is_local_host ? (
+                        <Laptop className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                      ) : (
+                        <Shield className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                      )}
+                      <span>{dev.ip}</span>
+                      {dev.is_trusted && (
+                        <span title="Trusted Device" className="text-emerald-400">
+                          <Check className="w-3 h-3" />
+                        </span>
+                      )}
+                    </div>
                   </td>
 
                   <td className="py-3 px-4 text-slate-300">
@@ -309,8 +358,15 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
                     <span className="text-cyber-text font-medium">{dev.vendor}</span>
                   </td>
 
-                  <td className="py-3 px-4 text-cyber-subtext">
-                    {dev.hostname || <span className="text-slate-600">—</span>}
+                  <td className="py-3 px-4">
+                    {dev.custom_name ? (
+                      <div>
+                        <span className="text-cyber-cyan font-medium block">{dev.custom_name}</span>
+                        <span className="text-cyber-subtext text-[10px]">{dev.hostname || '—'}</span>
+                      </div>
+                    ) : (
+                      <span className="text-cyber-subtext">{dev.hostname || <span className="text-slate-600">—</span>}</span>
+                    )}
                   </td>
 
                   <td className="py-3 px-4">
@@ -321,6 +377,12 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
                     ) : (
                       <Badge variant="gray">Station</Badge>
                     )}
+                  </td>
+
+                  <td className="py-3 px-4 font-sans">
+                    <span className="text-[11px] text-cyber-subtext px-2 py-0.5 rounded bg-black/40 border border-cyber-border">
+                      {dev.category || 'General'}
+                    </span>
                   </td>
 
                   <td className="py-3 px-4 text-cyber-subtext">
@@ -342,7 +404,7 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
                       </button>
                       <button
                         onClick={() => setSelectedDevice(dev)}
-                        title="View Device Details"
+                        title="View Device Details & Inventory"
                         className="p-1.5 rounded hover:bg-slate-800 text-cyber-subtext hover:text-cyber-cyan transition-colors"
                       >
                         <Eye className="w-3.5 h-3.5" />
@@ -353,7 +415,7 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
               ))}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-cyber-subtext">
+                  <td colSpan={8} className="py-8 text-center text-cyber-subtext">
                     No active devices matched your filter. Click "Run Discovery Sweep" to refresh.
                   </td>
                 </tr>
@@ -369,6 +431,7 @@ export const DeviceDiscoveryPage: React.FC<DeviceDiscoveryPageProps> = ({
         onClose={() => setSelectedDevice(null)}
         onNavigateToPing={onNavigateToPing}
         onNavigateToPortScan={onNavigateToPortScan}
+        onDeviceUpdated={handleDeviceUpdated}
       />
     </div>
   );

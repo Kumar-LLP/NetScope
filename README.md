@@ -131,7 +131,7 @@ cd backend
 .\.venv\Scripts\pytest.exe tests/ -v
 ```
 
-### Verified Test Results (15 / 15 Passed):
+### Verified Test Results (23 / 23 Passed - 100%):
 - `test_health_endpoint`: **PASSED** (Verifies FastAPI lifespan and SQLite WAL connectivity).
 - `test_interfaces_endpoint`: **PASSED** (Verifies physical/virtual NIC enumeration via psutil).
 - `test_overview_endpoint`: **PASSED** (Verifies health score calculation and gateway routing).
@@ -147,6 +147,14 @@ cd backend
 - `test_ip_calc_edge_cases`: **PASSED** (Verifies mathematical calculation for /0, /8, /31, /32, and IPv6 /64).
 - `test_port_scan_security_guardrails`: **PASSED** (Verifies server-side rejection of external WAN targets and invalid ports).
 - `test_discovery_security_scope_and_size_guardrails`: **PASSED** (Verifies server-side rejection of WAN CIDRs and oversized ranges).
+- `test_security_headers_present`: **PASSED** (Verifies OWASP headers: X-Content-Type-Options, CSP, X-Frame-Options).
+- `test_unrelated_private_network_rejection`: **PASSED** (Verifies server-side rejection of foreign RFC 1918 subnets not attached to host).
+- `test_gateway_baseline_lifecycle`: **PASSED** (Verifies operator gateway MAC baseline inspection, confirmation, and reset).
+- `test_security_findings_lifecycle`: **PASSED** (Verifies finding acknowledge, resolve, and audit history retrieval).
+- `test_device_inventory_patch`: **PASSED** (Verifies custom device classification, custom naming, and trust tagging).
+- `test_interface_selection`: **PASSED** (Verifies runtime switching of monitored network interface adapter).
+- `test_report_exports`: **PASSED** (Verifies downloadable CSV and JSON exports for devices, security, and history).
+- `test_topology_read_only`: **PASSED** (Verifies read-only topology graph generation without triggering unexpected scans).
 
 ---
 

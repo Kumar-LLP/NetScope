@@ -6,9 +6,10 @@ import socket
 import subprocess
 import time
 import uuid
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime, timezone
 
+from app.core.config import settings
 from app.network.interfaces import get_active_interface_ip, calculate_cidr, get_network_interfaces
 from app.network.gateway import get_default_gateway, get_gateway_mac
 from app.network.vendor import lookup_vendor
@@ -50,25 +51,69 @@ def stop_discovery(scan_id: Optional[str] = None):
             _active_session.cancel_event.set()
             _active_session.status = "stopped"
 
-def is_network_authorized(net: ipaddress.IPv4Network) -> bool:
+def get_authorized_networks() -> List[ipaddress.IPv4Network]:
     """
-    Validates that the target network belongs to an authorized private/local range.
-    Rejects public external networks.
+    Computes authorized IPv4 subnets based on active local network interfaces
+    plus any explicitly configured authorized networks in Settings.
     """
-    if net.is_private or net.is_loopback or net.is_link_local:
-        return True
-    
-    # Check if network matches any active local interface subnet
+    authorized: List[ipaddress.IPv4Network] = []
+
+    # 1. Loopback subnet
+    try:
+        authorized.append(ipaddress.IPv4Network("127.0.0.0/8", strict=False))
+    except Exception:
+        pass
+
+    # 2. Subnets of active local network interfaces
     try:
         interfaces = get_network_interfaces()
         for iface in interfaces:
-            if iface.ip_address and iface.netmask:
-                iface_net = ipaddress.IPv4Network(f"{iface.ip_address}/{iface.netmask}", strict=False)
-                if net.network_address == iface_net.network_address:
-                    return True
+            if iface.ip_address and iface.netmask and iface.is_up:
+                try:
+                    iface_net = ipaddress.IPv4Network(f"{iface.ip_address}/{iface.netmask}", strict=False)
+                    authorized.append(iface_net)
+                except Exception:
+                    continue
     except Exception:
         pass
-    return False
+
+    # 3. Explicitly configured authorized networks from settings
+    for net_str in settings.AUTHORIZED_NETWORKS:
+        try:
+            authorized.append(ipaddress.IPv4Network(net_str.strip(), strict=False))
+        except Exception:
+            continue
+
+    return authorized
+
+def is_network_authorized(net: ipaddress.IPv4Network) -> Tuple[bool, str]:
+    """
+    Validates that the target network belongs strictly to an active local network interface
+    or an explicitly configured authorized scope.
+    Rejects unrelated private networks and public external WAN subnets.
+    """
+    # Reject public networks immediately
+    if not (net.is_private or net.is_loopback or net.is_link_local):
+        return False, (
+            f"Target CIDR '{net}' is a public external WAN network. "
+            "Public WAN subnet scanning is strictly prohibited."
+        )
+
+    authorized_nets = get_authorized_networks()
+    for auth_net in authorized_nets:
+        # Check if target network is a subnet of an authorized network or identical
+        if net.subnet_of(auth_net) or net == auth_net:
+            return True, "Target network is within active local interface scope."
+
+    active_subnets = [
+        str(n) for n in authorized_nets
+        if n.network_address != ipaddress.IPv4Address("127.0.0.0")
+    ]
+    return False, (
+        f"Target network '{net}' is not within any active local network interface subnet "
+        f"({', '.join(active_subnets) if active_subnets else 'none detected'}) "
+        "or explicitly configured authorized scopes."
+    )
 
 def get_arp_table(target_network: Optional[ipaddress.IPv4Network] = None) -> Dict[str, str]:
     """
@@ -137,7 +182,6 @@ async def async_probe_host(ip: str, cancel_event: asyncio.Event) -> Optional[flo
             await writer.wait_closed()
             return round((time.perf_counter() - start) * 1000, 2)
         except ConnectionRefusedError:
-            # Active host rejected connection: confirms host is alive
             return round((time.perf_counter() - start) * 1000, 2)
         except Exception:
             continue
@@ -164,32 +208,35 @@ async def discover_devices(
 ) -> DeviceDiscoverResponse:
     """
     Discovers active devices on the local subnet using safe, authorized, non-privileged probes.
-    Validates CIDR, enforces private scope boundaries, and supports cancellation.
+    Validates CIDR, enforces active interface scope boundaries, and supports cancellation.
     """
     global _active_session, _session_lock
 
     # Validate target network or resolve active default interface
     if not target_cidr:
         interfaces = get_network_interfaces()
-        def_iface = next((i for i in interfaces if i.is_default and i.ip_address), None)
+        def_iface = next((i for i in interfaces if i.is_default and i.ip_address and i.is_up), None)
         if def_iface and def_iface.ip_address:
             target_cidr, _ = calculate_cidr(def_iface.ip_address, def_iface.netmask)
         else:
-            target_cidr = "192.168.1.0/24"
+            # Fallback to first up interface with IP
+            up_iface = next((i for i in interfaces if i.ip_address and i.is_up and not i.ip_address.startswith("127.")), None)
+            if up_iface and up_iface.ip_address:
+                target_cidr, _ = calculate_cidr(up_iface.ip_address, up_iface.netmask)
+            else:
+                target_cidr = "192.168.1.0/24"
 
     try:
         network = ipaddress.IPv4Network(target_cidr.strip(), strict=False)
     except Exception as e:
         raise ValueError(f"Invalid CIDR notation '{target_cidr}': {str(e)}")
 
-    # Security check: Target must belong to authorized private/local scope
-    if not is_network_authorized(network):
-        raise PermissionError(
-            f"Target CIDR '{target_cidr}' is outside authorized local/private network scope. "
-            "Public WAN subnet scanning is strictly prohibited."
-        )
+    # Security check: Target must belong strictly to active local interface or explicitly authorized scope
+    is_auth, auth_reason = is_network_authorized(network)
+    if not is_auth:
+        raise PermissionError(auth_reason)
 
-    # Security check: Prevent oversized sweeps
+    # Security check: Prevent oversized sweeps (maximum /24 = 256 addresses)
     if network.num_addresses > 256:
         raise ValueError(
             f"Oversized network range (/{network.prefixlen} contains {network.num_addresses} addresses). "
@@ -208,7 +255,7 @@ async def discover_devices(
         _active_session = session
 
     start_time = time.perf_counter()
-    active_ip = get_active_interface_ip() or "127.0.0.1"
+    active_ip = get_active_interface_ip()
     gateway_ip = get_default_gateway()
     gateway_mac = get_gateway_mac(gateway_ip)
 
@@ -261,7 +308,7 @@ async def discover_devices(
         except Exception:
             pass
 
-    if active_ip and active_ip != "127.0.0.1":
+    if active_ip and not active_ip.startswith("127."):
         try:
             if ipaddress.IPv4Address(active_ip) in network:
                 alive_ips.setdefault(active_ip, 0.1)

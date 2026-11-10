@@ -13,23 +13,24 @@ class InterfaceSchema(BaseModel):
     name: str
     ip_address: Optional[str] = None
     netmask: Optional[str] = None
-    broadcast: Optional[str] = None
     mac_address: Optional[str] = None
+    is_default: bool = False
     is_up: bool = True
     speed_mbps: Optional[int] = None
-    is_default: bool = False
 
 class OverviewResponse(BaseModel):
-    active_interface: str
-    local_ip: str
+    active_interface: Optional[str] = None
+    local_ip: Optional[str] = None
     public_ip: Optional[str] = None
-    subnet_mask: str
-    cidr: str
+    subnet_mask: Optional[str] = None
+    cidr: Optional[str] = None
     default_gateway: Optional[str] = None
     gateway_mac: Optional[str] = None
     dns_servers: List[str] = []
     internet_connected: bool = True
+    gateway_connected: bool = True
     current_latency_ms: Optional[float] = None
+    tcp_latency_ms: Optional[float] = None
     packet_loss_pct: float = 0.0
     download_kbps: float = 0.0
     upload_kbps: float = 0.0
@@ -46,12 +47,22 @@ class DeviceSchema(BaseModel):
     mac: Optional[str] = None
     vendor: str = "Unknown"
     hostname: Optional[str] = None
+    custom_name: Optional[str] = None
+    notes: Optional[str] = None
+    category: str = "workstation"
+    is_trusted: bool = False
     is_gateway: bool = False
     is_local_host: bool = False
     status: str = "online"
     response_time_ms: Optional[float] = None
     first_seen: Optional[datetime] = None
     last_seen: Optional[datetime] = None
+
+class DeviceUpdateRequest(BaseModel):
+    custom_name: Optional[str] = None
+    notes: Optional[str] = None
+    category: Optional[str] = None
+    is_trusted: Optional[bool] = None
 
 class DeviceDiscoverResponse(BaseModel):
     scan_id: str
@@ -78,7 +89,7 @@ class TopologyEdge(BaseModel):
     id: str
     source: str
     target: str
-    animated: bool = True
+    animated: bool = False
     style: Optional[Dict[str, Any]] = None
 
 class TopologyResponse(BaseModel):
@@ -87,8 +98,8 @@ class TopologyResponse(BaseModel):
 
 class PingRequest(BaseModel):
     target: str = Field(..., min_length=1, max_length=255)
-    count: int = Field(default=4, ge=1, le=10)
-    timeout_ms: int = Field(default=1000, ge=200, le=5000)
+    count: int = Field(default=4, ge=1, le=20)
+    timeout_ms: int = Field(default=1000, ge=100, le=5000)
 
 class PingResponse(BaseModel):
     target: str
@@ -98,24 +109,30 @@ class PingResponse(BaseModel):
     min_rtt_ms: Optional[float] = None
     avg_rtt_ms: Optional[float] = None
     max_rtt_ms: Optional[float] = None
-    history: List[float] = []
-    raw_output: Optional[str] = None
+    stddev_rtt_ms: Optional[float] = None
+    raw_output: str
 
 class DNSRequest(BaseModel):
     domain: str = Field(..., min_length=1, max_length=255)
-    record_type: str = Field(default="ALL")
+    record_type: str = Field(default="A", max_length=10)
     custom_server: Optional[str] = None
+
+class DNSRecord(BaseModel):
+    record_type: str
+    value: str
+    ttl: Optional[int] = None
 
 class DNSResponse(BaseModel):
     domain: str
+    record_type: Optional[str] = "ALL"
     resolved_by: str
-    records: Dict[str, List[str]]
     query_time_ms: float
+    records: Dict[str, List[str]] = {}
 
 class TracerouteRequest(BaseModel):
     target: str = Field(..., min_length=1, max_length=255)
-    max_hops: int = Field(default=15, ge=1, le=30)
-    timeout_ms: int = Field(default=1500, ge=500, le=5000)
+    max_hops: int = Field(default=30, ge=1, le=50)
+    timeout_ms: int = Field(default=2000, ge=500, le=5000)
 
 class TracerouteHop(BaseModel):
     hop: int
@@ -192,8 +209,22 @@ class SecurityFindingSchema(BaseModel):
     evidence: str
     impact: str
     remediation: str
-    status: str = "active"
+    target: Optional[str] = None
+    status: str = "active" # 'active', 'acknowledged', 'resolved'
     created_at: Optional[datetime] = None
+    acknowledged_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
+
+class GatewayBaselineResponse(BaseModel):
+    gateway_ip: Optional[str] = None
+    detected_mac: Optional[str] = None
+    confirmed_mac: Optional[str] = None
+    baseline_mac: Optional[str] = None
+    status: str # 'confirmed', 'unconfirmed', 'mismatch'
+    confirmed_at: Optional[str] = None
+
+class SelectInterfaceRequest(BaseModel):
+    interface_name: str
 
 class TelemetryBandwidth(BaseModel):
     download_bytes_per_sec: float
@@ -206,6 +237,8 @@ class TelemetryMessage(BaseModel):
     timestamp: str
     bandwidth: TelemetryBandwidth
     ping_ms: Optional[float] = None
+    tcp_latency_ms: Optional[float] = None
     packet_loss_pct: float = 0.0
     interface: str
     is_connected: bool
+    gateway_connected: Optional[bool] = None

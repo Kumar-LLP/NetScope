@@ -1,17 +1,21 @@
-import React from 'react';
-import { DiscoveredDevice } from '../../types/network';
+import React, { useState, useEffect } from 'react';
+import { DiscoveredDevice, DeviceUpdateRequest } from '../../types/network';
 import { Badge } from './Badge';
+import { api } from '../../services/api';
 import {
   X,
   Laptop,
   Router,
   Shield,
   Activity,
-  Terminal,
   Radio,
   Copy,
-  Clock,
-  CheckCircle2
+  CheckCircle2,
+  Save,
+  Tag,
+  FileText,
+  CheckSquare,
+  Square
 } from 'lucide-react';
 
 interface DeviceDetailDrawerProps {
@@ -19,15 +23,33 @@ interface DeviceDetailDrawerProps {
   onClose: () => void;
   onNavigateToPing?: (ip: string) => void;
   onNavigateToPortScan?: (ip: string) => void;
+  onDeviceUpdated?: (updated: DiscoveredDevice) => void;
 }
 
 export const DeviceDetailDrawer: React.FC<DeviceDetailDrawerProps> = ({
   device,
   onClose,
   onNavigateToPing,
-  onNavigateToPortScan
+  onNavigateToPortScan,
+  onDeviceUpdated
 }) => {
-  const [copied, setCopied] = React.useState(false);
+  const [copied, setCopied] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [customName, setCustomName] = useState('');
+  const [category, setCategory] = useState('');
+  const [notes, setNotes] = useState('');
+  const [isTrusted, setIsTrusted] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  useEffect(() => {
+    if (device) {
+      setCustomName(device.custom_name || '');
+      setCategory(device.category || 'General');
+      setNotes(device.notes || '');
+      setIsTrusted(Boolean(device.is_trusted));
+      setSaveSuccess(false);
+    }
+  }, [device]);
 
   if (!device) return null;
 
@@ -35,6 +57,32 @@ export const DeviceDetailDrawer: React.FC<DeviceDetailDrawerProps> = ({
     navigator.clipboard.writeText(JSON.stringify(device, null, 2));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleSaveInventory = async () => {
+    if (!device.id) {
+      alert('Cannot update device without a database ID.');
+      return;
+    }
+    try {
+      setSaving(true);
+      const updateData: DeviceUpdateRequest = {
+        custom_name: customName.trim() || null,
+        category: category.trim() || null,
+        notes: notes.trim() || null,
+        is_trusted: isTrusted
+      };
+      const updated = await api.updateDevice(device.id, updateData);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2500);
+      if (onDeviceUpdated) {
+        onDeviceUpdated(updated);
+      }
+    } catch (err: any) {
+      alert(`Failed to update device: ${err.message || err}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -53,8 +101,10 @@ export const DeviceDetailDrawer: React.FC<DeviceDetailDrawerProps> = ({
               )}
             </div>
             <div>
-              <h2 className="text-sm font-bold text-cyber-text">{device.ip}</h2>
-              <p className="text-xs text-cyber-subtext">{device.vendor}</p>
+              <h2 className="text-sm font-bold text-cyber-text">
+                {customName || device.hostname || device.ip}
+              </h2>
+              <p className="text-xs text-cyber-subtext font-mono">{device.ip} • {device.vendor}</p>
             </div>
           </div>
           <button
@@ -67,12 +117,99 @@ export const DeviceDetailDrawer: React.FC<DeviceDetailDrawerProps> = ({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
-          {/* Status Pill */}
+          {/* Status & Trust Pill */}
           <div className="flex items-center justify-between p-3 rounded-xl bg-cyber-card border border-cyber-border">
             <span className="text-xs text-cyber-subtext">Operating Status:</span>
-            <Badge variant="emerald" pulse>
-              ACTIVE ON SUBNET
-            </Badge>
+            <div className="flex items-center gap-2">
+              {isTrusted && (
+                <Badge variant="emerald">TRUSTED</Badge>
+              )}
+              <Badge variant={device.status === 'online' ? 'emerald' : 'gray'} pulse={device.status === 'online'}>
+                {device.status.toUpperCase()}
+              </Badge>
+            </div>
+          </div>
+
+          {/* Inventory Management Form */}
+          <div className="bg-cyber-card border border-cyber-border rounded-xl p-4 space-y-3 text-xs">
+            <span className="text-[10px] font-mono uppercase text-cyber-cyan block font-semibold">
+              Device Inventory & Classification
+            </span>
+
+            <div>
+              <label className="text-cyber-subtext text-[11px] block mb-1">Custom Device Name</label>
+              <input
+                type="text"
+                placeholder="e.g. Master Bedroom Smart TV"
+                value={customName}
+                onChange={(e) => setCustomName(e.target.value)}
+                className="w-full bg-black/50 border border-cyber-border rounded px-2.5 py-1.5 text-cyber-text text-xs focus:outline-none focus:border-cyber-cyan font-mono"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-cyber-subtext text-[11px] block mb-1">Category</label>
+                <select
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  className="w-full bg-black/50 border border-cyber-border rounded px-2 py-1.5 text-cyber-text text-xs focus:outline-none focus:border-cyber-cyan font-mono"
+                >
+                  <option value="General">General Host</option>
+                  <option value="Workstation">Workstation</option>
+                  <option value="Server">Server / Infrastructure</option>
+                  <option value="Router / Gateway">Router / Gateway</option>
+                  <option value="IoT / Embedded">IoT / Smart Device</option>
+                  <option value="Mobile">Mobile Device</option>
+                  <option value="Printer">Network Printer</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-cyber-subtext text-[11px] block mb-1">Trust Status</label>
+                <button
+                  type="button"
+                  onClick={() => setIsTrusted(!isTrusted)}
+                  className={`w-full flex items-center justify-center gap-2 py-1.5 rounded border text-xs font-medium transition-colors ${
+                    isTrusted
+                      ? 'bg-emerald-950/40 border-emerald-700/60 text-emerald-400'
+                      : 'bg-black/40 border-cyber-border text-cyber-subtext'
+                  }`}
+                >
+                  {isTrusted ? <CheckSquare className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
+                  <span>{isTrusted ? 'Verified Trusted' : 'Untrusted / New'}</span>
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="text-cyber-subtext text-[11px] block mb-1">Inventory Notes</label>
+              <textarea
+                rows={2}
+                placeholder="Operational notes, static assignment, or rack location..."
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                className="w-full bg-black/50 border border-cyber-border rounded px-2.5 py-1.5 text-cyber-text text-xs focus:outline-none focus:border-cyber-cyan resize-none"
+              />
+            </div>
+
+            <button
+              onClick={handleSaveInventory}
+              disabled={saving}
+              className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-cyber-cyan/20 border border-cyber-cyan hover:bg-cyber-cyan/30 text-cyber-cyan font-semibold text-xs transition-colors disabled:opacity-50"
+            >
+              {saveSuccess ? (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-emerald-400">Inventory Saved!</span>
+                </>
+              ) : (
+                <>
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{saving ? 'Saving...' : 'Update Device Inventory'}</span>
+                </>
+              )}
+            </button>
           </div>
 
           {/* Properties Table */}
@@ -93,7 +230,7 @@ export const DeviceDetailDrawer: React.FC<DeviceDetailDrawerProps> = ({
             </div>
 
             <div className="flex justify-between py-1 border-b border-cyber-border/50">
-              <span className="text-cyber-subtext font-sans">Hostname:</span>
+              <span className="text-cyber-subtext font-sans">DNS Hostname:</span>
               <span className="text-cyber-text">{device.hostname || 'Unresolved (No PTR)'}</span>
             </div>
 

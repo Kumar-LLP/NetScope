@@ -6,14 +6,21 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: netscope-backend
+    # Restrict published port strictly to loopback to prevent external network exposure
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./backend/data:/app/data
     environment:
       - HOST=0.0.0.0
       - PORT=8000
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   frontend:
     build:
@@ -21,7 +28,8 @@ services:
       dockerfile: Dockerfile
     container_name: netscope-frontend
     ports:
-      - "5173:80"
+      - "127.0.0.1:5173:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped

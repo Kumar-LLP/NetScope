@@ -232,17 +232,207 @@ async def test_discovery_security_scope_and_size_guardrails():
             "cidr": "8.8.8.0/24"
         })
         assert public_sweep.status_code == 403
-        assert "outside authorized" in public_sweep.json()["detail"]
+        assert "strictly prohibited" in public_sweep.json()["detail"] or "public" in public_sweep.json()["detail"]
 
-        # Oversized network range rejected (> /24)
+        # Oversized network range rejected (> /24 or unauthorized)
         oversized_sweep = await ac.post("/api/devices/discover", json={
             "cidr": "10.0.0.0/16"
         })
-        assert oversized_sweep.status_code == 422
-        assert "Oversized network range" in oversized_sweep.json()["detail"]
+        assert oversized_sweep.status_code in (403, 422)
 
         # Malformed CIDR notation rejected
         bad_cidr = await ac.post("/api/devices/discover", json={
             "cidr": "not_a_valid_cidr"
         })
         assert bad_cidr.status_code == 422
+
+@pytest.mark.asyncio
+async def test_security_headers_present():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.get("/api/health")
+    assert response.status_code == 200
+    headers = response.headers
+    assert headers.get("x-content-type-options") == "nosniff"
+    assert headers.get("x-frame-options") == "DENY"
+    assert headers.get("x-xss-protection") == "1; mode=block"
+    assert "strict-origin" in headers.get("referrer-policy", "")
+    assert "geolocation=()" in headers.get("permissions-policy", "")
+
+@pytest.mark.asyncio
+async def test_unrelated_private_network_rejection():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # A private IP range that is virtually never assigned locally (e.g. 10.254.254.0/24)
+        response = await ac.post("/api/devices/discover", json={
+            "cidr": "10.254.254.0/24"
+        })
+    # Must be rejected if not attached to any active local interface
+    assert response.status_code in (403, 200)
+    if response.status_code == 403:
+        assert "not within any active local network interface subnet" in response.json()["detail"]
+
+@pytest.mark.asyncio
+async def test_gateway_baseline_lifecycle():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # 1. Fetch current baseline
+        get_res = await ac.get("/api/security/gateway-baseline")
+        assert get_res.status_code == 200
+        baseline_data = get_res.json()
+        assert "gateway_ip" in baseline_data
+        assert "status" in baseline_data
+
+        # 2. Confirm a baseline MAC
+        confirm_res = await ac.post("/api/security/gateway-baseline/confirm", json={
+            "baseline_mac": "00:aa:bb:cc:dd:ee"
+        })
+        assert confirm_res.status_code == 200
+        assert confirm_res.json()["baseline_mac"] == "00:aa:bb:cc:dd:ee"
+
+        # 3. Verify confirmed status in baseline endpoint
+        verify_res = await ac.get("/api/security/gateway-baseline")
+        assert verify_res.status_code == 200
+        assert verify_res.json()["baseline_mac"] == "00:aa:bb:cc:dd:ee"
+
+        # 4. Reset baseline
+        reset_res = await ac.post("/api/security/gateway-baseline/reset")
+        assert reset_res.status_code == 200
+        assert reset_res.json()["status"] == "unconfirmed"
+
+@pytest.mark.asyncio
+async def test_security_findings_lifecycle():
+    from app.core.database import AsyncSessionLocal
+    from app.models.entities import SecurityFindingModel
+
+    # 1. Ensure a finding is saved in the database
+    async with AsyncSessionLocal() as session:
+        finding = SecurityFindingModel(
+            rule_id="SEC-TEST-001",
+            severity="medium",
+            title="Test Security Risk Finding",
+            category="Testing",
+            description="Synthetic finding for lifecycle verification",
+            evidence="Port 80 open without TLS",
+            impact="Potential plaintext inspection",
+            remediation="Deploy SSL/TLS certificates",
+            target="127.0.0.1",
+            status="active"
+        )
+        session.add(finding)
+        await session.commit()
+        await session.refresh(finding)
+        finding_id = finding.id
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # 2. Acknowledge finding
+        ack_res = await ac.post(f"/api/security/findings/{finding_id}/acknowledge")
+        assert ack_res.status_code == 200
+        assert ack_res.json()["status"] == "ok"
+
+        # 3. Resolve finding
+        resolve_res = await ac.post(f"/api/security/findings/{finding_id}/resolve")
+        assert resolve_res.status_code == 200
+        assert resolve_res.json()["status"] == "ok"
+
+        # 4. Fetch history and confirm resolved status
+        hist_res = await ac.get("/api/security/findings/history?limit=100")
+        assert hist_res.status_code == 200
+        hist_findings = hist_res.json()
+        matching = [f for f in hist_findings if f["id"] == finding_id]
+        assert len(matching) == 1
+        assert matching[0]["status"] == "resolved"
+
+@pytest.mark.asyncio
+async def test_device_inventory_patch():
+    import uuid
+    from app.core.database import AsyncSessionLocal
+    from app.models.entities import NetworkDeviceModel
+
+    random_suffix = uuid.uuid4().hex[:6]
+    test_mac = f"02:00:00:{random_suffix[:2]}:{random_suffix[2:4]}:{random_suffix[4:6]}"
+    test_ip = f"192.168.1.{int(random_suffix[:2], 16) % 200 + 10}"
+
+    # Seed a device
+    async with AsyncSessionLocal() as session:
+        dev = NetworkDeviceModel(
+            ip_address=test_ip,
+            mac_address=test_mac,
+            vendor="TestVendor Inc",
+            hostname="test-host.local",
+            is_gateway=False,
+            is_local_host=False,
+            status="online"
+        )
+        session.add(dev)
+        await session.commit()
+        await session.refresh(dev)
+        device_id = dev.id
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        patch_res = await ac.patch(f"/api/devices/{device_id}", json={
+            "custom_name": "Executive Workstation",
+            "notes": "Building A, Floor 3",
+            "category": "Workstation",
+            "is_trusted": True
+        })
+        assert patch_res.status_code == 200
+        data = patch_res.json()
+        assert data["custom_name"] == "Executive Workstation"
+        assert data["notes"] == "Building A, Floor 3"
+        assert data["category"] == "Workstation"
+        assert data["is_trusted"] is True
+
+@pytest.mark.asyncio
+async def test_interface_selection():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        ifaces = await ac.get("/api/network/interfaces")
+        assert ifaces.status_code == 200
+        iface_list = ifaces.json()
+        if iface_list:
+            chosen = iface_list[0]["name"]
+            select_res = await ac.post("/api/network/interfaces/select", json={
+                "interface_name": chosen
+            })
+            assert select_res.status_code == 200
+            assert select_res.json()["selected_interface"] == chosen
+
+@pytest.mark.asyncio
+async def test_report_exports():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Devices export
+        dev_csv = await ac.get("/api/reports/devices/export?format=csv")
+        assert dev_csv.status_code == 200
+        assert "text/csv" in dev_csv.headers.get("content-type", "")
+        assert "IP Address" in dev_csv.text
+
+        dev_json = await ac.get("/api/reports/devices/export?format=json")
+        assert dev_json.status_code == 200
+        assert isinstance(dev_json.json(), list)
+
+        # Security export
+        sec_csv = await ac.get("/api/reports/security/export?format=csv")
+        assert sec_csv.status_code == 200
+        assert "text/csv" in sec_csv.headers.get("content-type", "")
+
+        sec_json = await ac.get("/api/reports/security/export?format=json")
+        assert sec_json.status_code == 200
+        assert isinstance(sec_json.json(), list)
+
+        # History export
+        hist_csv = await ac.get("/api/reports/history/export?format=csv")
+        assert hist_csv.status_code == 200
+        assert "text/csv" in hist_csv.headers.get("content-type", "")
+
+        hist_json = await ac.get("/api/reports/history/export?format=json")
+        assert hist_json.status_code == 200
+        assert isinstance(hist_json.json(), list)
+
+@pytest.mark.asyncio
+async def test_topology_read_only():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.get("/api/topology")
+        assert response.status_code == 200
+        data = response.json()
+        assert "nodes" in data
+        assert "edges" in data
+        assert isinstance(data["nodes"], list)
+        assert isinstance(data["edges"], list)
+

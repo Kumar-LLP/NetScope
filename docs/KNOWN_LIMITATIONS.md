@@ -2,7 +2,7 @@
 
 **Product:** NetScope – Network Intelligence & Cybersecurity Monitoring Platform  
 **Document Classification:** Technical Architecture & Environmental Boundaries  
-**Last Updated:** November 9, 2026
+**Last Updated:** November 10, 2026
 
 ---
 
@@ -30,10 +30,10 @@ NetScope is intentionally engineered to operate **without requiring Windows Admi
 
 ## 2. Subnet Discovery & LAN Sweeping Limits
 
-### Scope Boundaries (/24 Default)
+### Scope Boundaries (/24 Default) & Interface Subnet Scoping
 * The automated device discovery sweeper restricts single-run active sweeps to `/24` subnets (maximum 254 candidate IP addresses).
 * Attempting to actively sweep `/16` (65,534 hosts) or `/8` (16,777,214 hosts) subnets would cause local Wi-Fi router buffer bloat and excessive ARP table churn.
-* Users with multi-subnet enterprise environments can specify target subnets explicitly in the CIDR input field.
+* **Strict Interface Scope Boundary**: NetScope strictly enforces that target subnets must be attached to an active local network interface. Probing arbitrary or foreign RFC 1918 subnets (e.g., `10.254.254.0/24` when the host is only attached to `192.168.1.0/24`) is rejected with HTTP 403 Forbidden. Operators requiring multi-homed or routed scanning can declare subnets in `AUTHORIZED_NETWORKS` in `.env`.
 
 ### Hostname Reverse DNS (PTR) Delays
 * On consumer routers or unmanaged Wi-Fi access points, many IoT devices and mobile phones do not register PTR records in local DNS.
@@ -57,12 +57,23 @@ NetScope is intentionally engineered to operate **without requiring Windows Admi
 * Hops displaying `* * * Request timed out` reflect standard carrier routing policies and do not represent a flaw in NetScope's parser.
 
 ### ICMP Ping Privileges on Windows
-* Calling Windows `ping.exe` via safe, tokenized subprocess execution is the recommended and universally reliable method on Windows 11. It eliminates the need for raw ICMP socket handles while providing precise millisecond latency metrics.
+* Calling Windows `ping.exe` via safe, tokenized subprocess execution is the recommended and universally reliable method on Windows 11. It eliminates the need for raw ICMP socket handles while providing precise min/avg/max millisecond latency and packet loss metrics.
+
+### Port Scanner Concurrency Guards
+* Port scans are limited to a maximum of 2 concurrent scans globally (`MAX_CONCURRENT_ACTIVE_SCANS = 2`) to prevent socket descriptor depletion on Windows workstations.
+* Port scanning targets are restricted to loopback and active interface subnets; scanning external WAN addresses is blocked server-side.
 
 ---
 
-## 5. Summary & Best Practices
+## 5. Database Concurrency & Storage Architecture
+
+* SQLite is configured in **WAL (Write-Ahead Logging)** mode with `PRAGMA synchronous = NORMAL` and `PRAGMA foreign_keys = ON`. This allows concurrent read operations by REST endpoints while the background telemetry collector appends metrics every 2 seconds.
+* Automatic schema migration helper executes on startup, allowing transparent schema upgrades without deleting existing operational data.
+
+---
+
+## 6. Summary & Best Practices
 
 1. **Firewalls**: Ensure local Windows Defender Firewall permits incoming and outgoing connections for Python and Node.js on local ports `8000` and `5173`.
 2. **Wi-Fi vs Ethernet**: Running NetScope over a wired Ethernet connection provides optimal packet-level accuracy and lower jitter compared to congested 2.4GHz Wi-Fi bands.
-3. **Database Maintenance**: Telemetry metric snapshots are stored in SQLite. For continuous 24/7 long-term deployments, users can manage history pruning via the Settings module.
+3. **Monitored Interface Switching**: Use the adapter selector on the Traffic Analytics page to switch between physical Ethernet, Wi-Fi, and virtual adapters (e.g. WSL/vEthernet).

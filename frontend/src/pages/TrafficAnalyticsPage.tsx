@@ -11,7 +11,12 @@ import {
   Activity,
   Layers,
   Radio,
-  RefreshCw
+  RefreshCw,
+  Download,
+  Wifi,
+  Server,
+  Zap,
+  Percent
 } from 'lucide-react';
 import {
   AreaChart,
@@ -27,13 +32,30 @@ import {
 export const TrafficAnalyticsPage: React.FC = () => {
   const { history, telemetry } = useTelemetry();
   const [interfaces, setInterfaces] = useState<NetworkInterface[]>([]);
+  const [selectedInterface, setSelectedInterface] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(true);
+  const [switching, setSwitching] = useState<boolean>(false);
+
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  };
 
   const fetchInterfaces = async () => {
     try {
       setLoading(true);
       const data = await api.getInterfaces();
       setInterfaces(data);
+      if (!selectedInterface && data.length > 0) {
+        const def = data.find((i) => i.is_default) || data[0];
+        setSelectedInterface(def.name);
+      }
     } catch (e) {
       console.error(e);
     } finally {
@@ -44,6 +66,34 @@ export const TrafficAnalyticsPage: React.FC = () => {
   useEffect(() => {
     fetchInterfaces();
   }, []);
+
+  useEffect(() => {
+    if (telemetry?.interface && !selectedInterface) {
+      setSelectedInterface(telemetry.interface);
+    }
+  }, [telemetry?.interface]);
+
+  const handleInterfaceChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const ifaceName = e.target.value;
+    setSelectedInterface(ifaceName);
+    try {
+      setSwitching(true);
+      await api.selectInterface(ifaceName);
+    } catch (err: any) {
+      alert(`Failed to switch interface: ${err.message || err}`);
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  const handleExportHistory = async (format: 'json' | 'csv') => {
+    try {
+      const blob = await api.exportHistory(format);
+      downloadBlob(blob, `netscope_metrics_history_${Date.now()}.${format}`);
+    } catch (err: any) {
+      alert(`Export failed: ${err.message || err}`);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -59,22 +109,62 @@ export const TrafficAnalyticsPage: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={fetchInterfaces}
-          disabled={loading}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-cyber-card border border-cyber-border hover:border-cyber-cyan text-xs font-medium text-cyber-text transition-colors self-start sm:self-auto disabled:opacity-50"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-          <span>Refresh Counters</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+          {/* Interface Selector Dropdown */}
+          <div className="flex items-center gap-2 bg-cyber-card border border-cyber-border rounded-lg px-3 py-1.5 text-xs">
+            <Wifi className="w-3.5 h-3.5 text-cyber-cyan" />
+            <span className="text-cyber-subtext font-mono">Adapter:</span>
+            <select
+              value={selectedInterface || telemetry?.interface || ''}
+              onChange={handleInterfaceChange}
+              disabled={switching || loading}
+              className="bg-transparent text-cyber-text font-mono focus:outline-none cursor-pointer max-w-[200px] truncate"
+            >
+              {interfaces.map((iface) => (
+                <option key={iface.name} value={iface.name} className="bg-cyber-bg text-cyber-text">
+                  {iface.name} {iface.ip_address ? `(${iface.ip_address})` : '(No IP)'} {iface.is_default ? '★' : ''}
+                </option>
+              ))}
+            </select>
+            {switching && <RefreshCw className="w-3 h-3 animate-spin text-cyber-cyan" />}
+          </div>
+
+          {/* Export Controls */}
+          <div className="flex items-center gap-1 bg-cyber-card border border-cyber-border rounded-lg p-0.5">
+            <button
+              onClick={() => handleExportHistory('csv')}
+              className="px-2.5 py-1 text-xs font-medium text-cyber-subtext hover:text-cyber-cyan transition-colors flex items-center gap-1"
+              title="Export historical metrics as CSV"
+            >
+              <Download className="w-3 h-3" /> CSV
+            </button>
+            <span className="text-cyber-border">|</span>
+            <button
+              onClick={() => handleExportHistory('json')}
+              className="px-2.5 py-1 text-xs font-medium text-cyber-subtext hover:text-cyber-cyan transition-colors flex items-center gap-1"
+              title="Export historical metrics as JSON"
+            >
+              <Download className="w-3 h-3" /> JSON
+            </button>
+          </div>
+
+          <button
+            onClick={fetchInterfaces}
+            disabled={loading}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-cyber-card border border-cyber-border hover:border-cyber-cyan text-xs font-medium text-cyber-text transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
+        </div>
       </div>
 
       {/* KPI Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           title="Download Throughput"
           value={telemetry?.bandwidth.download_formatted || '0 KB/s'}
-          subtitle="Instantaneous RX Rate"
+          subtitle={`Adapter: ${telemetry?.interface || 'Default'}`}
           icon={ArrowDown}
           variant="cyan"
         />
@@ -88,12 +178,19 @@ export const TrafficAnalyticsPage: React.FC = () => {
         />
 
         <StatCard
-          title="Active Adapters"
-          value={interfaces.filter(i => i.is_up).length}
-          unit={`/ ${interfaces.length} Total`}
-          subtitle="Physical & Virtual Devices"
-          icon={Layers}
+          title="ICMP Ping Latency"
+          value={telemetry?.ping_ms != null ? `${Math.round(telemetry.ping_ms)} ms` : 'N/A'}
+          subtitle={telemetry?.tcp_latency_ms != null ? `TCP: ${Math.round(telemetry.tcp_latency_ms)} ms` : 'Multi-probe ICMP'}
+          icon={Zap}
           variant="purple"
+        />
+
+        <StatCard
+          title="Packet Loss"
+          value={telemetry?.packet_loss_pct != null ? `${telemetry.packet_loss_pct.toFixed(1)}%` : '0%'}
+          subtitle={telemetry?.is_connected ? 'Gateway Reachable' : 'Gateway Unreachable'}
+          icon={Percent}
+          variant={telemetry?.packet_loss_pct && telemetry.packet_loss_pct > 5 ? 'rose' : 'cyan'}
         />
       </div>
 
@@ -104,6 +201,9 @@ export const TrafficAnalyticsPage: React.FC = () => {
             <h3 className="text-sm font-semibold text-cyber-text">Historical Telemetry Stream</h3>
             <p className="text-xs text-cyber-subtext">Recent sliding window throughput measurements (KB/s)</p>
           </div>
+          <span className="text-[11px] font-mono text-cyber-subtext">
+            Monitored: <strong className="text-cyber-cyan">{telemetry?.interface || 'All'}</strong>
+          </span>
         </div>
 
         <div className="h-72 w-full">

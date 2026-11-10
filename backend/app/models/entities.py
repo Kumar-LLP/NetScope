@@ -33,6 +33,10 @@ class NetworkDeviceModel(Base):
     mac_address = Column(String(17), unique=True, nullable=True, index=True)
     vendor = Column(String(255), default="Unknown")
     hostname = Column(String(255), nullable=True)
+    custom_name = Column(String(128), nullable=True)
+    notes = Column(Text, nullable=True)
+    category = Column(String(64), default="workstation") # 'workstation', 'server', 'router', 'iot', 'printer', 'mobile'
+    is_trusted = Column(Boolean, default=False)
     is_gateway = Column(Boolean, default=False)
     is_local_host = Column(Boolean, default=False)
     status = Column(String(32), default="online")
@@ -49,7 +53,7 @@ class NetworkScanModel(Base):
     id = Column(String(64), primary_key=True)
     scan_type = Column(String(32), nullable=False) # 'device_discovery', 'port_scan'
     target_range = Column(String(128), nullable=False)
-    status = Column(String(32), nullable=False, default="in_progress") # 'in_progress', 'completed', 'failed', 'stopped'
+    status = Column(String(32), nullable=False, default="in_progress") # 'in_progress', 'completed', 'failed', 'stopped', 'timed_out'
     total_targets = Column(Integer, default=0)
     found_targets = Column(Integer, default=0)
     duration_seconds = Column(Float, default=0.0)
@@ -79,6 +83,7 @@ class NetworkMetricModel(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     interface_id = Column(Integer, ForeignKey("network_interfaces.id"), nullable=True)
+    interface_name = Column(String(128), nullable=True)
     download_bytes_sec = Column(Float, nullable=False, default=0.0)
     upload_bytes_sec = Column(Float, nullable=False, default=0.0)
     latency_ms = Column(Float, nullable=True)
@@ -146,8 +151,12 @@ class SecurityFindingModel(Base):
     evidence = Column(Text, nullable=False)
     impact = Column(Text, nullable=False)
     remediation = Column(Text, nullable=False)
-    status = Column(String(32), default="active") # 'active', 'resolved', 'ignored'
+    target = Column(String(255), nullable=True)
+    status = Column(String(32), default="active") # 'active', 'acknowledged', 'resolved'
     created_at = Column(DateTime, default=utcnow)
+    acknowledged_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     device = relationship("NetworkDeviceModel", back_populates="security_findings")
 

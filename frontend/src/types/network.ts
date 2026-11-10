@@ -41,12 +41,32 @@ export interface DiscoveredDevice {
   mac: string | null;
   vendor: string;
   hostname: string | null;
+  custom_name?: string | null;
+  notes?: string | null;
+  category?: string | null;
+  is_trusted?: boolean;
   is_gateway: boolean;
   is_local_host: boolean;
   status: string;
   response_time_ms: number | null;
   first_seen?: string;
   last_seen?: string;
+}
+
+export interface DeviceUpdateRequest {
+  custom_name?: string | null;
+  notes?: string | null;
+  category?: string | null;
+  is_trusted?: boolean;
+}
+
+export interface GatewayBaselineResponse {
+  gateway_ip: string | null;
+  detected_mac: string | null;
+  baseline_mac: string | null;
+  status: 'confirmed' | 'unconfirmed' | 'mismatch' | 'no_gateway';
+  confirmed_at: string | null;
+  history_count: number;
 }
 
 export interface DeviceDiscoverResponse {
@@ -158,8 +178,12 @@ export interface SecurityFinding {
   evidence: string;
   impact: string;
   remediation: string;
-  status: string;
+  status: 'active' | 'acknowledged' | 'resolved' | string;
+  target?: string | null;
   created_at?: string;
+  acknowledged_at?: string | null;
+  resolved_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface TelemetryPayload {
@@ -172,6 +196,7 @@ export interface TelemetryPayload {
     upload_formatted: string;
   };
   ping_ms: number | null;
+  tcp_latency_ms?: number | null;
   packet_loss_pct: number;
   interface: string;
   is_connected: boolean;

@@ -1,6 +1,5 @@
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone
-import re
 
 from app.schemas.network import SecurityFindingSchema, DeviceSchema
 from app.network.gateway import get_default_gateway, get_gateway_mac, get_dns_servers
@@ -16,7 +15,6 @@ DATABASE_PORTS: Dict[int, str] = {
 
 class SecurityAuditor:
     def __init__(self):
-        self.observed_gateway_mac: Optional[str] = None
         self.ip_mac_history: Dict[str, set[str]] = {}
 
     def record_ip_mac_observation(self, ip: str, mac: str):
@@ -28,12 +26,15 @@ class SecurityAuditor:
         self,
         devices: List[DeviceSchema],
         open_ports: Optional[List[Dict[str, Any]]] = None,
-        baseline_gateway_mac: Optional[str] = None,
+        confirmed_baseline_mac: Optional[str] = None,
+        baseline_status: str = "unconfirmed",
+        confirmed_at: Optional[str] = None,
         raw_arp_observations: Optional[Dict[str, str]] = None
     ) -> List[SecurityFindingSchema]:
         """
         Runs comprehensive, heuristic-based security auditing against active topology,
         inventory, observed ARP mappings, and exposed ports.
+        Requires explicit operator confirmation before raising critical gateway baseline alerts.
         """
         findings: List[SecurityFindingSchema] = []
         now = datetime.now(timezone.utc)
@@ -41,28 +42,36 @@ class SecurityAuditor:
         gw_ip = get_default_gateway()
         gw_mac = get_gateway_mac(gw_ip)
 
-        # Baseline MAC resolution (prioritize persistent baseline from DB if passed)
-        if baseline_gateway_mac:
-            effective_baseline = baseline_gateway_mac
-        elif self.observed_gateway_mac:
-            effective_baseline = self.observed_gateway_mac
-        else:
-            effective_baseline = gw_mac
-            self.observed_gateway_mac = gw_mac
-
         # Rule SEC-001: Gateway MAC Baseline & ARP Poisoning Audit
-        if gw_mac and effective_baseline:
-            if effective_baseline != gw_mac:
+        if gw_mac:
+            if baseline_status == "confirmed" and confirmed_baseline_mac:
+                if confirmed_baseline_mac.upper() != gw_mac.upper():
+                    findings.append(
+                        SecurityFindingSchema(
+                            rule_id="SEC-001",
+                            severity="critical",
+                            title="Default Gateway MAC Address Changed (Potential ARP Poisoning)",
+                            category="mitm_detection",
+                            description="The hardware address of the default gateway router has unexpectedly changed compared to the confirmed baseline.",
+                            evidence=f"Confirmed Baseline: {confirmed_baseline_mac} (confirmed at {confirmed_at or 'earlier'}) -> Detected Active MAC: {gw_mac} on Gateway IP {gw_ip}",
+                            impact="A rogue device on the local network segment may be executing an ARP spoofing / poisoning attack to intercept or modify network packets.",
+                            remediation="Inspect your local router/switch ARP tables. Verify router MAC address against physical hardware sticker. Investigate suspicious connected devices.",
+                            target=gw_ip,
+                            created_at=now
+                        )
+                    )
+            elif baseline_status == "unconfirmed":
                 findings.append(
                     SecurityFindingSchema(
-                        rule_id="SEC-001",
-                        severity="critical",
-                        title="Default Gateway MAC Address Changed (Potential ARP Poisoning)",
-                        category="mitm_detection",
-                        description="The hardware address of the default gateway router has unexpectedly changed compared to the verified baseline.",
-                        evidence=f"Baseline Gateway MAC: {effective_baseline} -> Observed Active MAC: {gw_mac} on Gateway IP {gw_ip}",
-                        impact="A rogue device on the local network segment may be executing an ARP spoofing / poisoning attack to intercept or modify network packets.",
-                        remediation="Inspect your local router/switch ARP tables. Verify router MAC address against physical hardware sticker. Investigate suspicious connected devices.",
+                        rule_id="SEC-001-INFO",
+                        severity="info",
+                        title="Gateway Hardware Baseline Pending Operator Confirmation",
+                        category="audit_baseline",
+                        description="An active default gateway MAC was detected. Please review and explicitly confirm this baseline to enable automated ARP spoofing detection.",
+                        evidence=f"Detected Gateway IP: {gw_ip}, Hardware MAC: {gw_mac}",
+                        impact="Automated spoofing detection requires an operator-confirmed baseline to prevent false alarms.",
+                        remediation="Click 'Confirm Gateway Baseline' in the Security Insights panel once verified.",
+                        target=gw_ip,
                         created_at=now
                     )
                 )
@@ -89,6 +98,7 @@ class SecurityAuditor:
                         evidence=f"Conflicting hardware MAC addresses: {', '.join(sorted(macs))} for IP {ip}",
                         impact="Packets directed to this IP will experience flapping routes, dropped packets, or possible session interception.",
                         remediation="Check DHCP scope settings and static IP assignments on local network adapters to eliminate overlapping IP configurations.",
+                        target=ip,
                         created_at=now
                     )
                 )
@@ -113,6 +123,7 @@ class SecurityAuditor:
                         evidence=f"Active DNS Nameserver: {dns_ip}",
                         impact="Unencrypted DNS queries can be logged, profiled, or redirected by upstream ISPs and intermediate carriers.",
                         remediation="Configure DNS-over-HTTPS (DoH) or switch to verified privacy-centric DNS providers (Cloudflare 1.1.1.1 or Quad9 9.9.9.9).",
+                        target=dns_ip,
                         created_at=now
                     )
                 )
@@ -121,7 +132,7 @@ class SecurityAuditor:
         if open_ports:
             for p in open_ports:
                 port_num = p.get("port")
-                target = p.get("target")
+                target = p.get("target") or "Unknown"
                 banner = (p.get("banner") or "").strip()
 
                 # Rule SEC-004: Telnet (Port 23)
@@ -137,6 +148,7 @@ class SecurityAuditor:
                             evidence=f"Port 23 open on {target}. Banner: '{banner or 'No banner grabbed'}'",
                             impact="Telnet transmits authentication credentials and commands across the network in plaintext, allowing immediate eavesdropping.",
                             remediation="Immediately disable Telnet daemon and migrate management sessions to SSH (Port 22) with key-based authentication.",
+                            target=f"{target}:23",
                             created_at=now
                         )
                     )
@@ -155,6 +167,7 @@ class SecurityAuditor:
                                 evidence=f"Port 21 open on {target}. Banner: '{banner or 'No banner grabbed'}'",
                                 impact="FTP transmits usernames and passwords in cleartext. Transferred data can be intercepted on unencrypted networks.",
                                 remediation="Switch to SFTP (over SSH) or enforce FTPS (Explicit TLS) with mandatory encryption.",
+                                target=f"{target}:21",
                                 created_at=now
                             )
                         )
@@ -172,6 +185,7 @@ class SecurityAuditor:
                             evidence=f"Port {port_num} ({db_name}) active. Banner: '{banner or 'Standard DB Protocol'}'",
                             impact="Direct database network exposure increases risk of brute-force attacks, unauthenticated probing, and data exfiltration.",
                             remediation="Bind database daemon exclusively to localhost (127.0.0.1) or restrict network access using local firewall rules and VPN tunnels.",
+                            target=f"{target}:{port_num}",
                             created_at=now
                         )
                     )
@@ -191,6 +205,7 @@ class SecurityAuditor:
                                 evidence=f"Port 80 open on {gw_ip}. Response Banner: '{banner or 'HTTP listener active'}'",
                                 impact="Router administrative sessions conducted over plain HTTP can expose admin passwords to local eavesdroppers.",
                                 remediation="Log into router administration settings, enable HTTPS web management, and disable cleartext HTTP access.",
+                                target=f"{gw_ip}:80",
                                 created_at=now
                             )
                         )
@@ -207,6 +222,7 @@ class SecurityAuditor:
                             evidence=f"Port {port_num} active on {target}",
                             impact="Unprotected or misconfigured SMB shares can expose internal files and provide opportunities for lateral movement attacks.",
                             remediation="Ensure SMB signing is required, audit anonymous access, and restrict SMB to private subnets using Windows Defender Firewall.",
+                            target=f"{target}:{port_num}",
                             created_at=now
                         )
                     )
@@ -223,6 +239,7 @@ class SecurityAuditor:
                             evidence=f"Port 3389 open on {target}",
                             impact="RDP ports exposed across local or routed subnets are frequent targets for automated dictionary and brute-force attacks.",
                             remediation="Enforce Network Level Authentication (NLA), implement account lockout policies, and access RDP solely through secure VPN.",
+                            target=f"{target}:3389",
                             created_at=now
                         )
                     )
@@ -236,9 +253,10 @@ class SecurityAuditor:
                     title="Network Security Baseline Satisfied",
                     category="audit_baseline",
                     description="No rogue gateways, IP conflicts, or insecure unencrypted legacy management ports were detected.",
-                    evidence=f"Gateway {gw_ip} baseline verified ({effective_baseline or 'Verified'}), {len(devices)} active devices analyzed.",
+                    evidence=f"Gateway {gw_ip} active ({confirmed_baseline_mac or 'Verified'}), {len(devices)} active devices analyzed.",
                     impact="Local network segment operates within healthy configuration parameters.",
                     remediation="Maintain regular device discovery sweeps and keep router firmware updated.",
+                    target=gw_ip,
                     created_at=now
                 )
             )

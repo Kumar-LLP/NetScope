@@ -4,6 +4,8 @@ import {
   NetworkOverview,
   DiscoveredDevice,
   DeviceDiscoverResponse,
+  DeviceUpdateRequest,
+  GatewayBaselineResponse,
   TopologyResponse,
   PingResponse,
   DNSResponse,
@@ -73,6 +75,32 @@ export const api = {
   async getDevices(): Promise<DiscoveredDevice[]> {
     const res = await fetch(`${API_BASE}/devices`);
     if (!res.ok) throw new Error('Failed to fetch devices');
+    return res.json();
+  },
+
+  async updateDevice(deviceId: number, data: DeviceUpdateRequest): Promise<DiscoveredDevice> {
+    const res = await fetch(`${API_BASE}/devices/${deviceId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to update device' }));
+      throw new Error(err.detail || 'Failed to update device');
+    }
+    return res.json();
+  },
+
+  async selectInterface(interfaceName: string): Promise<{ status: string; selected_interface: string; message: string }> {
+    const res = await fetch(`${API_BASE}/network/interfaces/select`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interface_name: interfaceName })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to select interface' }));
+      throw new Error(err.detail || 'Failed to select interface');
+    }
     return res.json();
   },
 
@@ -166,6 +194,79 @@ export const api = {
     const res = await fetch(`${API_BASE}/security/findings`);
     if (!res.ok) throw new Error('Failed to fetch security findings');
     return res.json();
+  },
+
+  async getSecurityFindingsHistory(limit: number = 100): Promise<SecurityFinding[]> {
+    const res = await fetch(`${API_BASE}/security/findings/history?limit=${limit}`);
+    if (!res.ok) throw new Error('Failed to fetch security findings history');
+    return res.json();
+  },
+
+  async acknowledgeSecurityFinding(findingId: number): Promise<{ status: string; message: string; finding_id: number }> {
+    const res = await fetch(`${API_BASE}/security/findings/${findingId}/acknowledge`, {
+      method: 'POST'
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to acknowledge finding' }));
+      throw new Error(err.detail || 'Failed to acknowledge finding');
+    }
+    return res.json();
+  },
+
+  async resolveSecurityFinding(findingId: number): Promise<{ status: string; message: string; finding_id: number }> {
+    const res = await fetch(`${API_BASE}/security/findings/${findingId}/resolve`, {
+      method: 'POST'
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to resolve finding' }));
+      throw new Error(err.detail || 'Failed to resolve finding');
+    }
+    return res.json();
+  },
+
+  async getGatewayBaseline(): Promise<GatewayBaselineResponse> {
+    const res = await fetch(`${API_BASE}/security/gateway-baseline`);
+    if (!res.ok) throw new Error('Failed to fetch gateway baseline');
+    return res.json();
+  },
+
+  async confirmGatewayBaseline(baselineMac?: string): Promise<{ status: string; message: string; gateway_ip: string; baseline_mac: string }> {
+    const res = await fetch(`${API_BASE}/security/gateway-baseline/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(baselineMac ? { baseline_mac: baselineMac } : {})
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to confirm baseline' }));
+      throw new Error(err.detail || 'Failed to confirm baseline');
+    }
+    return res.json();
+  },
+
+  async resetGatewayBaseline(): Promise<{ status: string; message: string }> {
+    const res = await fetch(`${API_BASE}/security/gateway-baseline/reset`, {
+      method: 'POST'
+    });
+    if (!res.ok) throw new Error('Failed to reset gateway baseline');
+    return res.json();
+  },
+
+  async exportDevices(format: 'json' | 'csv' = 'json'): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/reports/devices/export?format=${format}`);
+    if (!res.ok) throw new Error('Failed to export devices');
+    return res.blob();
+  },
+
+  async exportSecurityFindings(format: 'json' | 'csv' = 'json'): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/reports/security/export?format=${format}`);
+    if (!res.ok) throw new Error('Failed to export security findings');
+    return res.blob();
+  },
+
+  async exportHistory(format: 'json' | 'csv' = 'json'): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/reports/history/export?format=${format}`);
+    if (!res.ok) throw new Error('Failed to export history');
+    return res.blob();
   },
 
   async getHistory(): Promise<any[]> {

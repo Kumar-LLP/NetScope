@@ -3,7 +3,7 @@
 **Target:** NetScope – Network Intelligence & Cybersecurity Monitoring Platform  
 **Audit Scope:** Backend Services, Network Engine, REST APIs, Database Layer, Docker Reverse Proxy, Frontend Application  
 **Auditor:** Antigravity Senior Application Security & Architecture Review  
-**Date:** November 9, 2026  
+**Date:** November 10, 2026  
 **Status:** **SECURE / HARDENED (LOW RISK PROFILE)**
 
 ---
@@ -15,11 +15,12 @@ NetScope is designed as a hybrid network diagnostic tool and cybersecurity audit
 ### Core Threat Vectors Assessed
 1. **Command Injection & Shell Escaping**: Exploitation of diagnostic utilities (`ping`, `traceroute`, `arp`) via malicious hostnames or IP inputs.
 2. **Arbitrary Network Scanning & WAN Abuse**: Unauthorized scanning of external third-party internet targets.
-3. **Subnet Flooding & DoS**: Flooding internal subnets through oversized CIDR sweeps (e.g. `/16` or `/8`).
-4. **Privilege Escalation**: Unauthorized requirement or misuse of Administrator / root system capabilities.
-5. **SQL Injection & Data Tampering**: Manipulation of SQLite database records storing metrics and audit logs.
-6. **Cross-Origin & Reverse Proxy Exposure**: Unrestricted cross-origin requests or misconfigured Docker reverse proxies.
-7. **Credential & Secret Leakage**: Accidental inclusion of API keys, private certificates, or internal tokens.
+3. **Foreign Private Subnet Reconnaissance**: Probing arbitrary RFC 1918 subnets outside the host's active local interface network.
+4. **Subnet Flooding & DoS**: Flooding internal subnets through oversized CIDR sweeps (e.g. `/16` or `/8`).
+5. **Gateway ARP Poisoning & MITM Attacks**: Untrusted initial baseline trusting a compromised attacker during ARP spoofing.
+6. **SQL Injection & Data Tampering**: Manipulation of SQLite database records storing metrics and audit logs.
+7. **Cross-Origin & Reverse Proxy Exposure**: Unrestricted cross-origin requests or misconfigured Docker reverse proxies.
+8. **Credential & Secret Leakage**: Accidental inclusion of API keys, private certificates, or internal tokens.
 
 ---
 
@@ -27,54 +28,70 @@ NetScope is designed as a hybrid network diagnostic tool and cybersecurity audit
 
 ### 2.1 Server-Side Network Scope Authorization (Anti-Abuse)
 * **Rule**: Client checkboxes (`authorized: true`) are never treated as sufficient proof of authorization.
-* **Implementation in `ports.py`**:
-  - Targets are resolved and validated server-side via `is_target_authorized_scope()`.
-  - Authorized targets are strictly restricted to: Loopback (`127.0.0.1`, `::1`), local adapter IPs, and private subnets (RFC 1918 / link-local).
-  - External public WAN targets (e.g. `8.8.8.8`, `google.com`) are **strictly rejected with HTTP 403 Forbidden**.
-* **Implementation in `discovery.py`**:
-  - Subnet sweeps are strictly restricted to private RFC 1918 ranges or active local interface subnets via `is_network_authorized()`.
+* **Strict Interface-Bound Subnet Scoping in `discovery.py`**:
+  - `get_authorized_networks()` enumerates all active local interface IPv4 addresses and netmasks via `psutil`.
+  - Subnet sweeps are strictly restricted to subnets that are physically attached to an active host adapter.
+  - Foreign or unrelated RFC 1918 subnets (e.g., `10.254.254.0/24` when the host is on `192.168.1.0/24`) are **strictly rejected with HTTP 403 Forbidden**.
   - Public WAN CIDRs (e.g. `8.8.8.0/24`) are **strictly rejected with HTTP 403 Forbidden**.
   - Oversized subnets (> 256 addresses, e.g. `/16` or `/8`) are **strictly rejected with HTTP 422 Unprocessable Entity**.
+* **Strict Port Boundary & Scoping in `ports.py`**:
+  - Targets are resolved and validated server-side via `is_target_authorized_scope()`.
+  - Authorized targets are strictly restricted to: Loopback (`127.0.0.1`, `::1`), host IP, and active interface subnets.
+  - External public WAN targets (e.g. `8.8.8.8`, `google.com`) are **strictly rejected with HTTP 403 Forbidden**.
+  - Concurrency limit `MAX_CONCURRENT_ACTIVE_SCANS = 2` prevents socket exhaustion.
 
-### 2.2 Strict Port Boundary & Input Validation
+### 2.2 Operator-Confirmed Gateway MAC Baseline Protection
+* **Defense Against Initial MITM Poisoning**:
+  - Auto-trusting the initial observed Gateway MAC is vulnerable if an ARP poisoner is already active when the application starts.
+  - In NetScope, the detected gateway MAC is initially marked **`unconfirmed`** (`SEC-001-INFO`).
+  - The human operator must explicitly inspect the MAC (verifying it against physical router labels or configuration) and click **"Confirm Baseline"** via `POST /api/security/gateway-baseline/confirm`.
+  - Once confirmed, any divergence between the confirmed baseline and active ARP tables immediately triggers a **CRITICAL severity alert (`SEC-001`)**.
+  - Operators can reset or re-baseline at any time via `POST /api/security/gateway-baseline/reset`.
+
+### 2.3 Security Finding Persistence & Lifecycle Management
+* **Database Models & Endpoints**:
+  - Findings are persisted in the SQLite `security_findings` table with unique constraint on `(rule_id, title, status)`.
+  - Supports operator workflow:
+    - `POST /api/security/findings/{id}/acknowledge`: Marks active finding as acknowledged.
+    - `POST /api/security/findings/{id}/resolve`: Marks finding as resolved.
+    - `GET /api/security/findings/history`: Audits complete chronological finding history with filtering by status and severity.
+
+### 2.4 HTTP Security Headers Middleware
+* **Implementation in `main.py`**:
+  - Automatically appends standard OWASP defensive headers on every response:
+    - `X-Content-Type-Options: nosniff`
+    - `X-Frame-Options: DENY`
+    - `X-XSS-Protection: 1; mode=block`
+    - `Referrer-Policy: strict-origin-when-cross-origin`
+    - `Permissions-Policy: geolocation=(), camera=(), microphone=()`
+
+### 2.5 Strict Port Boundary & Input Validation
 * **Implementation in `schemas/network.py`**:
   - `@field_validator("ports")` strictly validates that every requested port number is an integer in the range `1 <= port <= 65535`. Port 0, negative values, and values > 65535 are rejected with HTTP 422.
   - `@field_validator("target")` strips input and rejects control characters and shell metacharacters.
 
-### 2.3 Zero-Shell Execution Architecture
+### 2.6 Zero-Shell Execution Architecture
 * **Rule**: The parameter `shell=True` is strictly prohibited throughout the codebase.
 * **Implementation**: All system process invocations (`subprocess.run` or `asyncio.create_subprocess_exec`) utilize strictly tokenized argument vectors:
   ```python
-  cmd = ["ping", "-n", str(count), "-w", str(timeout * 1000), target]
+  cmd = ["ping", "-n", str(count), "-w", str(timeout_ms), target]
   proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
   ```
   Even if shell metacharacters (`&`, `;`, `|`, `` ` ``, `$`) are passed into `target`, the OS treats them as literal command arguments.
 
-### 2.4 Mathematical IP Calculator (Zero Memory Exhaustion)
+### 2.7 Mathematical IP Calculator (Zero Memory Exhaustion)
 * **Implementation in `diagnostics.py`**:
   - Calculates host counts, usable ranges, and broadcast addresses purely mathematically without generating lists of addresses in memory.
   - Fully supports `/0`, `/8`, `/16`, `/24`, `/31` (RFC 3021 point-to-point 2-host links), `/32` (single host), and IPv6 prefixes (`/64`, `/128`).
 
-### 2.5 Security Auditor Enhancements & Baseline Persistence
-* **Gateway Baseline MAC**: Stored persistently in SQLite `application_settings` table (key: `gateway_baseline_mac`). If the gateway MAC changes compared to the persistent baseline, `SEC-001` (Potential ARP Poisoning) is triggered.
-* **Duplicate IP Conflicts**: Tracks IP-to-MAC associations across raw ARP tables and discovery sweeps; triggers `SEC-002` if conflicting hardware addresses claim the same IP.
-* **Verified Protocols**: Inspects banners to distinguish cleartext protocols from secured services:
-  - Telnet (23): Flagged as critical/high with captured banner.
-  - Plain FTP (21): Flagged if TLS/SSL is not enforced.
-  - Gateway HTTP (80): Evaluates if HTTP safely redirects to HTTPS (`Location: https://`).
-  - Database Services: Detects exposed MSSQL (1433), Oracle (1521), MySQL (3306), PostgreSQL (5432), Redis (6379), MongoDB (27017).
-
-### 2.6 Docker Nginx Reverse Proxy Architecture
-* **Implementation in `frontend/nginx.conf`**:
+### 2.8 Docker Port Hardening & Reverse Proxy Architecture
+* **Loopback Binding in `docker-compose.yml`**:
+  - Backend is bound strictly to `127.0.0.1:8000:8000`.
+  - Frontend is bound strictly to `127.0.0.1:5173:80`.
+  - Prevents unintended exposure of the backend daemon to external LAN adapters without an authenticating proxy.
+* **Reverse Proxy in `frontend/nginx.conf`**:
   - `/api/` proxied to `http://backend:8000/api/` with proxy headers and 60s timeout.
   - `/ws/` proxied to `http://backend:8000/ws/` with HTTP/1.1 Upgrade headers (`Upgrade $http_upgrade`, `Connection "upgrade"`) and 86400s timeout.
-  - Eliminates CORS issues in containerized production environments.
-
-### 2.7 Frontend WebSocket Resilience
-* **Implementation in `useTelemetry.ts`**:
-  - Relative same-origin host resolution via `${protocol}//${window.location.host}/ws/network`.
-  - Exponential backoff retry (1s -> 1.5s -> 2.25s -> max 10s).
-  - Explicit socket closure and listener cleanup on unmount to prevent connection leaks.
 
 ---
 
@@ -82,7 +99,8 @@ NetScope is designed as a hybrid network diagnostic tool and cybersecurity audit
 
 | Rule Code | Threat Description | Detection Logic | Severity |
 | :--- | :--- | :--- | :---: |
-| **SEC-001** | Gateway ARP Spoofing | Persistent gateway MAC baseline mismatch against active ARP table. | **CRITICAL** |
+| **SEC-001** | Gateway ARP Spoofing | Confirmed gateway MAC baseline mismatch against active ARP table. | **CRITICAL** |
+| **SEC-001-INFO** | Unconfirmed Baseline | Gateway MAC detected but unconfirmed by human operator. | **INFO** |
 | **SEC-002** | Duplicate IP Conflicts | Conflicting distinct MAC addresses claiming identical IP address. | **HIGH** |
 | **SEC-003** | Rogue DNS Resolver | Upstream DNS server pointing to untrusted external unencrypted IP. | **LOW** |
 | **SEC-004** | Cleartext Telnet Listener | Port 23 active with unencrypted terminal banner. | **CRITICAL** |
@@ -104,6 +122,6 @@ NetScope is designed as a hybrid network diagnostic tool and cybersecurity audit
 
 ## 5. Security Audit Conclusion
 
-NetScope implements defense-in-depth security principles. Server-side authorization prevents abuse, input validation prevents command injection and memory exhaustion, and Docker Nginx reverse proxy ensures secure container communication.
+NetScope implements defense-in-depth security principles. Server-side authorization prevents abuse, input validation prevents command injection and memory exhaustion, operator baseline confirmation protects against ARP spoofing, and Docker loopback binding ensures safe container execution.
 
 **Final Assessment: APPROVED FOR DEPLOYMENT**
