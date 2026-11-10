@@ -169,3 +169,38 @@ class ApplicationSettingsModel(Base):
     value = Column(Text, nullable=False)
     description = Column(String(255), nullable=True)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class PacketCaptureSessionModel(Base):
+    __tablename__ = "packet_capture_sessions"
+
+    id = Column(String(64), primary_key=True)
+    interface_name = Column(String(128), nullable=False)
+    status = Column(String(32), default="running") # 'running', 'stopped', 'completed', 'error'
+    total_packets = Column(Integer, default=0)
+    tcp_packets = Column(Integer, default=0)
+    udp_packets = Column(Integer, default=0)
+    icmp_packets = Column(Integer, default=0)
+    dns_packets = Column(Integer, default=0)
+    other_packets = Column(Integer, default=0)
+    total_bytes = Column(Integer, default=0)
+    duration_seconds = Column(Float, default=0.0)
+    started_at = Column(DateTime, default=utcnow)
+    stopped_at = Column(DateTime, nullable=True)
+
+
+class NetworkAnomalyModel(Base):
+    __tablename__ = "network_anomalies"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    anomaly_type = Column(String(64), nullable=False) # 'traffic_spike', 'gateway_mac_change', 'unknown_device', 'excessive_latency'
+    severity = Column(String(16), nullable=False) # 'critical', 'high', 'medium', 'low'
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    evidence = Column(Text, nullable=False)
+    target = Column(String(255), nullable=True)
+    confidence = Column(String(32), default="confirmed") # 'confirmed', 'potential'
+    threshold_trigger = Column(String(128), nullable=True)
+    detected_at = Column(DateTime, default=utcnow)
+    status = Column(String(32), default="active") # 'active', 'investigating', 'resolved', 'false_positive'
+    resolved_at = Column(DateTime, nullable=True)

@@ -36,27 +36,34 @@ def calculate_cidr(ip: str, netmask: Optional[str]) -> Tuple[str, str]:
 
 def get_network_interfaces() -> List[InterfaceSchema]:
     """
-    Enumerates all system network interfaces, resolving IP, Netmask, Broadcast,
-    MAC address, operational status, and line speed.
+    Enumerates all system network interfaces, resolving IPv4, IPv6, Netmask, Broadcast,
+    MAC address, operational status, interface type, and line speed.
     """
     active_ip = get_active_interface_ip()
     addrs = psutil.net_if_addrs()
     stats = psutil.net_if_stats()
 
     interfaces: List[InterfaceSchema] = []
+    idx = 1
 
     for name, addr_list in addrs.items():
         ipv4_info = None
+        ipv6_str = None
         mac_addr = None
 
         for addr in addr_list:
             if addr.family == socket.AF_INET:
                 ipv4_info = addr
+            elif hasattr(socket, "AF_INET6") and addr.family == socket.AF_INET6:
+                # Capture global or link-local IPv6 address (strip scope id if present)
+                raw_v6 = addr.address.split("%")[0]
+                if not ipv6_str or not raw_v6.startswith("fe80"):
+                    ipv6_str = raw_v6
             elif getattr(addr, "family", None) == getattr(psutil, "AF_LINK", None):
                 mac_addr = addr.address
 
         # Only list if it has an address or is active
-        if not ipv4_info and not mac_addr:
+        if not ipv4_info and not mac_addr and not ipv6_str:
             continue
 
         stat = stats.get(name)
@@ -69,6 +76,19 @@ def get_network_interfaces() -> List[InterfaceSchema]:
 
         is_default = (ip_str == active_ip) if ip_str and active_ip else False
 
+        # Determine interface type categorization
+        lower_name = name.lower()
+        if "loopback" in lower_name or (ip_str and ip_str.startswith("127.")):
+            iface_type = "loopback"
+        elif any(k in lower_name for k in ["wi-fi", "wifi", "wlan", "wireless", "802.11"]):
+            iface_type = "wifi"
+        elif any(k in lower_name for k in ["vethernet", "hyper-v", "vmware", "virtual", "wsl", "virbr"]):
+            iface_type = "virtual"
+        elif any(k in lower_name for k in ["tap", "tun", "vpn", "wireguard", "tailscale"]):
+            iface_type = "vpn"
+        else:
+            iface_type = "ethernet"
+
         # Normalize MAC format
         if mac_addr:
             mac_addr = mac_addr.replace("-", ":").upper()
@@ -77,15 +97,19 @@ def get_network_interfaces() -> List[InterfaceSchema]:
             InterfaceSchema(
                 name=name,
                 ip_address=ip_str,
+                ipv6_address=ipv6_str,
                 netmask=mask_str,
                 broadcast=bcast_str,
                 mac_address=mac_addr,
                 is_up=is_up,
                 speed_mbps=speed,
                 is_default=is_default,
+                interface_type=iface_type,
+                index=idx
             )
         )
+        idx += 1
 
-    # Sort so active/default interface is at the top
-    interfaces.sort(key=lambda x: (not x.is_default, not x.is_up, x.name))
+    # Sort so active/default interface is at the top, then active physical NICs, then virtual
+    interfaces.sort(key=lambda x: (not x.is_default, not x.is_up, x.interface_type == "virtual", x.name))
     return interfaces

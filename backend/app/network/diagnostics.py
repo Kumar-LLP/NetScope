@@ -97,9 +97,10 @@ def run_ping(target: str, count: int = 4, timeout_ms: int = 1000) -> PingRespons
 def run_dns_lookup(domain: str, record_type: str = "ALL", custom_server: Optional[str] = None) -> DNSResponse:
     """
     Resolves domain records across A, AAAA, MX, NS, CNAME, TXT, SOA, PTR types with
-    strict input validation and distinguishing no-records from lookup timeouts.
+    strict input validation, returning structured statuses (success, no_answer, nxdomain, timeout, resolver_error).
     """
     import dns.resolver
+    import dns.exception
 
     domain = sanitize_target(domain)
     r_type_clean = record_type.strip().upper()
@@ -127,16 +128,35 @@ def run_dns_lookup(domain: str, record_type: str = "ALL", custom_server: Optiona
     )
 
     records: Dict[str, List[str]] = {}
+    statuses_by_type: Dict[str, str] = {}
+    overall_status = "success"
     start = time.perf_counter()
 
     for qtype in types_to_query:
         try:
             answers = resolver.resolve(domain, qtype, lifetime=2.0)
             records[qtype] = [str(r.to_text()) for r in answers]
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+            statuses_by_type[qtype] = "success" if records[qtype] else "no_answer"
+        except dns.resolver.NXDOMAIN:
             records[qtype] = []
+            statuses_by_type[qtype] = "nxdomain"
+            overall_status = "nxdomain"
+        except dns.resolver.NoAnswer:
+            records[qtype] = []
+            statuses_by_type[qtype] = "no_answer"
+        except dns.exception.Timeout:
+            records[qtype] = []
+            statuses_by_type[qtype] = "timeout"
+            if overall_status != "nxdomain":
+                overall_status = "timeout"
         except Exception:
             records[qtype] = []
+            statuses_by_type[qtype] = "resolver_error"
+            if overall_status not in ("nxdomain", "timeout"):
+                overall_status = "resolver_error"
+
+    if overall_status == "success" and not any(records.values()):
+        overall_status = "no_answer"
 
     duration = round((time.perf_counter() - start) * 1000, 2)
     return DNSResponse(
@@ -144,13 +164,15 @@ def run_dns_lookup(domain: str, record_type: str = "ALL", custom_server: Optiona
         record_type=r_type_clean,
         resolved_by=str(resolved_by),
         records=records,
-        query_time_ms=duration
+        query_time_ms=duration,
+        status=overall_status,
+        statuses_by_type=statuses_by_type
     )
 
 def run_traceroute(target: str, max_hops: int = 15, timeout_ms: int = 1500) -> TracerouteResponse:
     """
     Executes hop-by-hop traceroute using tracert (Windows) or traceroute (Linux).
-    Handles timeouts gracefully without dropping partial hops.
+    Handles timeouts gracefully without dropping partial hops, validating subprocess exit codes.
     """
     target = sanitize_target(target)
     is_win = platform.system().lower() == "windows"
@@ -161,10 +183,18 @@ def run_traceroute(target: str, max_hops: int = 15, timeout_ms: int = 1500) -> T
     )
 
     timeout_seconds = max(5.0, (max_hops * (timeout_ms / 1000.0)) + 3.0)
+    timed_out = False
+    exit_code = 0
+    err_msg = None
+
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
         raw_output = proc.stdout
+        exit_code = proc.returncode
+        if exit_code != 0:
+            err_msg = proc.stderr.strip() if proc.stderr else f"Traceroute exited with code {exit_code}"
     except subprocess.TimeoutExpired as e:
+        timed_out = True
         raw_output = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "Traceroute timed out.")
     except FileNotFoundError:
         raise RuntimeError("Traceroute system utility not found on this host.")
@@ -198,10 +228,18 @@ def run_traceroute(target: str, max_hops: int = 15, timeout_ms: int = 1500) -> T
                     )
                 )
 
+    status_str = "completed"
+    if timed_out:
+        status_str = "timed_out"
+    elif exit_code != 0 and not hops:
+        status_str = "error"
+
     return TracerouteResponse(
         target=target,
         total_hops=len(hops),
-        hops=hops
+        hops=hops,
+        status=status_str,
+        error_message=err_msg
     )
 
 def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
@@ -230,6 +268,7 @@ def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
     if is_ipv4:
         netmask_str = str(net.netmask)
         prefix = net.prefixlen
+        wildcard_str = str(ipaddress.IPv4Address(int(ipaddress.IPv4Address("255.255.255.255")) - int(net.netmask)))
         if prefix == 32:
             usable_count = 1
             usable_range = [str(net.network_address), str(net.network_address)]
@@ -253,6 +292,7 @@ def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
         # IPv6
         netmask_str = str(net.netmask)
         prefix = net.prefixlen
+        wildcard_str = None
         bcast_str = None  # IPv6 uses multicast, has no broadcast address
         if prefix == 128:
             usable_count = 1
@@ -270,6 +310,8 @@ def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
         ip_version=net.version,
         network_address=str(net.network_address),
         netmask=netmask_str,
+        wildcard_mask=wildcard_str,
+        prefix_length=prefix,
         broadcast_address=bcast_str,
         usable_host_range=usable_range,
         total_hosts=total_hosts,

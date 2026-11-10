@@ -37,7 +37,11 @@ from app.schemas.network import (
     PortScanResponse,
     SecurityFindingSchema,
     GatewayBaselineResponse,
-    SelectInterfaceRequest
+    SelectInterfaceRequest,
+    PaginatedDevicesResponse,
+    PacketCaptureStatusResponse,
+    AnomalySchema,
+    LearningTopic
 )
 from app.models.entities import (
     NetworkDeviceModel,
@@ -48,7 +52,9 @@ from app.models.entities import (
     DNSResultModel,
     PortDiagnosticModel,
     SecurityFindingModel,
-    ApplicationSettingsModel
+    ApplicationSettingsModel,
+    PacketCaptureSessionModel,
+    NetworkAnomalyModel
 )
 from app.network.interfaces import get_network_interfaces, get_active_interface_ip, calculate_cidr
 from app.network.gateway import (
@@ -66,6 +72,9 @@ from app.network.diagnostics import run_ping, run_dns_lookup, run_traceroute, ca
 from app.network.ports import run_port_scan
 from app.monitoring.traffic import traffic_monitor, calculate_health_score
 from app.security.auditor import security_auditor
+from app.network.packet_analysis import packet_analyzer
+from app.security.anomaly import anomaly_detector
+from app.network.learning import get_learning_topics_with_context
 
 router = APIRouter()
 
@@ -346,8 +355,12 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
             )
             for d in res_all.scalars().all()
         ]
-    except Exception:
+    except Exception as e:
         await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database transaction failure during discovery persistence: {str(e)}"
+        )
 
     return result
 
@@ -404,9 +417,42 @@ async def get_scan_progress():
     return get_discovery_progress()
 
 @router.get("/devices", response_model=List[DeviceSchema])
-async def list_devices(db: AsyncSession = Depends(get_db)):
-    """Returns discovered devices from database inventory."""
-    res = await db.execute(select(NetworkDeviceModel).order_by(NetworkDeviceModel.ip_address.asc()))
+async def list_devices(
+    search: Optional[str] = Query(None, description="Search term across IP, MAC, hostname, custom name, vendor"),
+    status: Optional[str] = Query(None, description="Filter by status: online, stale, offline"),
+    vendor: Optional[str] = Query(None, description="Filter by vendor"),
+    category: Optional[str] = Query(None, description="Filter by device category"),
+    sort_by: Optional[str] = Query("ip_address", description="Sort field: ip_address, first_seen, last_seen, vendor"),
+    db: AsyncSession = Depends(get_db)
+):
+    """Returns discovered devices from database inventory with filtering, search, and sorting."""
+    query = select(NetworkDeviceModel)
+    if search:
+        search_pattern = f"%{search.strip()}%"
+        query = query.where(
+            (NetworkDeviceModel.ip_address.ilike(search_pattern)) |
+            (NetworkDeviceModel.mac_address.ilike(search_pattern)) |
+            (NetworkDeviceModel.hostname.ilike(search_pattern)) |
+            (NetworkDeviceModel.custom_name.ilike(search_pattern)) |
+            (NetworkDeviceModel.vendor.ilike(search_pattern))
+        )
+    if status:
+        query = query.where(NetworkDeviceModel.status == status.strip().lower())
+    if vendor:
+        query = query.where(NetworkDeviceModel.vendor.ilike(f"%{vendor.strip()}%"))
+    if category:
+        query = query.where(NetworkDeviceModel.category.ilike(f"%{category.strip()}%"))
+
+    if sort_by == "last_seen":
+        query = query.order_by(NetworkDeviceModel.last_seen.desc())
+    elif sort_by == "first_seen":
+        query = query.order_by(NetworkDeviceModel.first_seen.asc())
+    elif sort_by == "vendor":
+        query = query.order_by(NetworkDeviceModel.vendor.asc())
+    else:
+        query = query.order_by(NetworkDeviceModel.ip_address.asc())
+
+    res = await db.execute(query)
     db_devs = res.scalars().all()
     return [
         DeviceSchema(
@@ -427,6 +473,89 @@ async def list_devices(db: AsyncSession = Depends(get_db)):
         )
         for d in db_devs
     ]
+
+@router.get("/devices/paginated", response_model=PaginatedDevicesResponse)
+async def list_devices_paginated(
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    vendor: Optional[str] = Query(None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=200),
+    sort_by: Optional[str] = Query("ip_address"),
+    db: AsyncSession = Depends(get_db)
+):
+    """Returns paginated discovered devices inventory with total counts and pagination metadata."""
+    from sqlalchemy import func
+    base_query = select(NetworkDeviceModel)
+    count_query = select(func.count(NetworkDeviceModel.id))
+
+    if search:
+        search_pattern = f"%{search.strip()}%"
+        filter_expr = (
+            (NetworkDeviceModel.ip_address.ilike(search_pattern)) |
+            (NetworkDeviceModel.mac_address.ilike(search_pattern)) |
+            (NetworkDeviceModel.hostname.ilike(search_pattern)) |
+            (NetworkDeviceModel.custom_name.ilike(search_pattern)) |
+            (NetworkDeviceModel.vendor.ilike(search_pattern))
+        )
+        base_query = base_query.where(filter_expr)
+        count_query = count_query.where(filter_expr)
+
+    if status:
+        base_query = base_query.where(NetworkDeviceModel.status == status.strip().lower())
+        count_query = count_query.where(NetworkDeviceModel.status == status.strip().lower())
+    if vendor:
+        base_query = base_query.where(NetworkDeviceModel.vendor.ilike(f"%{vendor.strip()}%"))
+        count_query = count_query.where(NetworkDeviceModel.vendor.ilike(f"%{vendor.strip()}%"))
+
+    # Execute total count
+    total_count_res = await db.execute(count_query)
+    total_count = total_count_res.scalar() or 0
+
+    if sort_by == "last_seen":
+        base_query = base_query.order_by(NetworkDeviceModel.last_seen.desc())
+    elif sort_by == "first_seen":
+        base_query = base_query.order_by(NetworkDeviceModel.first_seen.asc())
+    elif sort_by == "vendor":
+        base_query = base_query.order_by(NetworkDeviceModel.vendor.asc())
+    else:
+        base_query = base_query.order_by(NetworkDeviceModel.ip_address.asc())
+
+    offset = (page - 1) * page_size
+    base_query = base_query.offset(offset).limit(page_size)
+
+    res = await db.execute(base_query)
+    db_devs = res.scalars().all()
+
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+
+    items = [
+        DeviceSchema(
+            id=d.id,
+            ip=d.ip_address,
+            mac=d.mac_address,
+            vendor=d.vendor or "Unknown",
+            hostname=d.hostname,
+            custom_name=d.custom_name,
+            notes=d.notes,
+            category=d.category or "workstation",
+            is_trusted=d.is_trusted,
+            is_gateway=d.is_gateway,
+            is_local_host=d.is_local_host,
+            status=d.status,
+            first_seen=d.first_seen,
+            last_seen=d.last_seen
+        )
+        for d in db_devs
+    ]
+
+    return PaginatedDevicesResponse(
+        total_count=total_count,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        devices=items
+    )
 
 @router.get("/topology", response_model=TopologyResponse)
 async def get_network_topology(db: AsyncSession = Depends(get_db)):
@@ -621,18 +750,31 @@ async def confirm_gateway_baseline(
     payload: Optional[Dict[str, Any]] = Body(None),
     db: AsyncSession = Depends(get_db)
 ):
-    """Explicitly confirms the gateway MAC as the trusted baseline with strict format validation."""
+    """
+    Explicitly confirms the gateway MAC as the trusted baseline.
+    Validates format, verifies correspondence with detected gateway, and prevents arbitrary MAC baselining.
+    """
     gw_ip = get_default_gateway()
-    detected_mac = get_gateway_mac(gw_ip) if gw_ip else None
-    
+    if not gw_ip:
+        raise HTTPException(
+            status_code=503,
+            detail="Default gateway is unavailable: Host has no default network gateway configured."
+        )
+
+    detected_mac = get_gateway_mac(gw_ip)
+    if not detected_mac:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gateway detection failure: Unable to resolve physical MAC address for gateway '{gw_ip}' from ARP cache."
+        )
+
+    detected_mac_norm = detected_mac.replace("-", ":").upper()
+
     mac_to_confirm = None
     if payload and payload.get("baseline_mac"):
         mac_to_confirm = str(payload["baseline_mac"]).strip()
-    elif detected_mac:
-        mac_to_confirm = detected_mac
-
-    if not mac_to_confirm:
-        raise HTTPException(status_code=400, detail="Cannot confirm baseline: No active gateway MAC detected or provided.")
+    else:
+        mac_to_confirm = detected_mac_norm
 
     # Strict MAC address format validation (AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF)
     if not MAC_REGEX.match(mac_to_confirm):
@@ -642,7 +784,39 @@ async def confirm_gateway_baseline(
         )
 
     mac_to_confirm = mac_to_confirm.replace("-", ":").upper()
+
+    # Verify that the supplied MAC corresponds to the currently detected gateway
+    if mac_to_confirm != detected_mac_norm:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Gateway baseline mismatch: Supplied MAC '{mac_to_confirm}' does not correspond to currently "
+                f"detected gateway MAC '{detected_mac_norm}' at IP '{gw_ip}'. Arbitrary or unverified MAC addresses cannot "
+                "be established as trusted baselines without correspondence."
+            )
+        )
+
+    # Check if baseline is already established
+    res_status = await db.execute(select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "gateway_baseline_status"))
+    res_mac = await db.execute(select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "gateway_baseline_mac"))
+    res_time = await db.execute(select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "gateway_baseline_confirmed_at"))
+    
+    status_row = res_status.scalars().first()
+    mac_row = res_mac.scalars().first()
+    time_row = res_time.scalars().first()
+
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    if status_row and status_row.value == "confirmed" and mac_row and mac_row.value == mac_to_confirm:
+        # Baseline already established for this exact MAC
+        return GatewayBaselineResponse(
+            gateway_ip=gw_ip,
+            detected_mac=detected_mac_norm,
+            confirmed_mac=mac_to_confirm,
+            baseline_mac=mac_to_confirm,
+            status="confirmed",
+            confirmed_at=time_row.value if time_row else now_iso
+        )
 
     # Upsert settings
     for key, val in [
@@ -661,7 +835,7 @@ async def confirm_gateway_baseline(
 
     return GatewayBaselineResponse(
         gateway_ip=gw_ip,
-        detected_mac=detected_mac,
+        detected_mac=detected_mac_norm,
         confirmed_mac=mac_to_confirm,
         baseline_mac=mac_to_confirm,
         status="confirmed",
@@ -1090,3 +1264,192 @@ async def get_settings():
         "telemetry_interval": settings.TELEMETRY_INTERVAL_SECONDS,
         "max_concurrent_port_scans": settings.MAX_CONCURRENT_PORT_SCANS
     }
+
+# =========================================================================
+# PACKET-LEVEL ANALYSIS & ANOMALY DETECTION (OPTIONAL / PRIVACY-SAFE)
+# =========================================================================
+
+@router.post("/packets/start", response_model=PacketCaptureStatusResponse)
+async def start_packet_capture(
+    interface_name: Optional[str] = Query(None, description="Interface to bind capture to"),
+    db: AsyncSession = Depends(get_db)
+):
+    """Starts an opt-in packet analysis session on the specified or default interface."""
+    iface = interface_name or traffic_monitor.selected_interface or traffic_monitor.get_auto_interface()
+    status = packet_analyzer.start_capture(iface)
+    if status.is_capturing and status.session_id:
+        try:
+            sess_record = PacketCaptureSessionModel(
+                id=status.session_id,
+                interface_name=iface,
+                status="running"
+            )
+            db.add(sess_record)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+    return status
+
+@router.post("/packets/stop", response_model=PacketCaptureStatusResponse)
+async def stop_packet_capture(db: AsyncSession = Depends(get_db)):
+    """Stops the active packet analysis session and finalizes duration."""
+    status = packet_analyzer.stop_capture()
+    if status.session_id:
+        try:
+            res = await db.execute(select(PacketCaptureSessionModel).where(PacketCaptureSessionModel.id == status.session_id))
+            sess = res.scalars().first()
+            if sess:
+                sess.status = "completed"
+                sess.total_packets = status.stats.total_packets
+                sess.tcp_packets = status.stats.tcp_packets
+                sess.udp_packets = status.stats.udp_packets
+                sess.icmp_packets = status.stats.icmp_packets
+                sess.dns_packets = status.stats.dns_packets
+                sess.other_packets = status.stats.other_packets
+                sess.total_bytes = status.stats.total_bytes
+                sess.duration_seconds = status.stats.duration_seconds
+                sess.stopped_at = datetime.now(timezone.utc)
+                await db.commit()
+        except Exception:
+            await db.rollback()
+    return status
+
+@router.get("/packets/status", response_model=PacketCaptureStatusResponse)
+async def get_packet_capture_status():
+    """Returns the live packet capture status and protocol distribution."""
+    return packet_analyzer.get_status()
+
+@router.get("/security/anomalies", response_model=List[AnomalySchema])
+async def list_network_anomalies(db: AsyncSession = Depends(get_db)):
+    """
+    Evaluates active telemetry, baseline status, and device inventory to detect explainable network anomalies.
+    Persists newly identified anomalies into the database.
+    """
+    global _cached_devices
+    down_kbps = 0.0
+    up_kbps = 0.0
+    icmp_lat = None
+    loss_pct = 0.0
+    if traffic_monitor.latest_telemetry:
+        down_kbps = traffic_monitor.latest_telemetry.bandwidth.download_bytes_per_sec / 1024.0
+        up_kbps = traffic_monitor.latest_telemetry.bandwidth.upload_bytes_per_sec / 1024.0
+        icmp_lat = traffic_monitor.latest_telemetry.ping_ms
+        loss_pct = traffic_monitor.latest_telemetry.packet_loss_pct
+
+    gw_ip = get_default_gateway()
+    gw_mac = get_gateway_mac(gw_ip) if gw_ip else None
+    
+    # Check baseline status
+    res_status = await db.execute(select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "gateway_baseline_status"))
+    res_mac = await db.execute(select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "gateway_baseline_mac"))
+    s_row = res_status.scalars().first()
+    m_row = res_mac.scalars().first()
+    gw_changed = bool(
+        s_row and s_row.value == "confirmed" and m_row and m_row.value and gw_mac and
+        m_row.value.upper() != gw_mac.upper()
+    )
+
+    detected = anomaly_detector.detect_anomalies(
+        current_download_kbps=down_kbps,
+        current_upload_kbps=up_kbps,
+        current_latency_ms=icmp_lat,
+        packet_loss_pct=loss_pct,
+        devices=_cached_devices,
+        gateway_mac_changed=gw_changed,
+        gateway_ip=gw_ip,
+        current_gw_mac=gw_mac
+    )
+
+    # Persist detected anomalies avoiding exact duplicates
+    try:
+        for a in detected:
+            existing_res = await db.execute(
+                select(NetworkAnomalyModel).where(
+                    NetworkAnomalyModel.anomaly_type == a.anomaly_type,
+                    NetworkAnomalyModel.status == "active"
+                )
+            )
+            existing = existing_res.scalars().first()
+            if existing:
+                existing.evidence = a.evidence
+                a.id = existing.id
+            else:
+                new_a = NetworkAnomalyModel(
+                    anomaly_type=a.anomaly_type,
+                    severity=a.severity,
+                    title=a.title,
+                    description=a.description,
+                    evidence=a.evidence,
+                    target=a.target,
+                    confidence=a.confidence,
+                    threshold_trigger=a.threshold_trigger,
+                    status="active"
+                )
+                db.add(new_a)
+                await db.flush()
+                a.id = new_a.id
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
+    return detected
+
+@router.post("/security/anomalies/tune")
+async def tune_anomaly_thresholds(
+    traffic_spike_kbps: Optional[float] = Query(None, ge=100.0),
+    packet_loss_pct: Optional[float] = Query(None, ge=1.0, le=100.0),
+    latency_surge_ms: Optional[float] = Query(None, ge=10.0)
+):
+    """Allows operator to adjust sensitivity thresholds for anomaly detection rules."""
+    anomaly_detector.tune_thresholds(
+        traffic_spike_kbps=traffic_spike_kbps,
+        packet_loss_pct=packet_loss_pct,
+        latency_surge_ms=latency_surge_ms
+    )
+    return {
+        "status": "ok",
+        "thresholds": {
+            "traffic_spike_threshold_kbps": anomaly_detector.traffic_spike_threshold_kbps,
+            "packet_loss_surge_pct": anomaly_detector.packet_loss_surge_pct,
+            "latency_surge_ms": anomaly_detector.latency_surge_ms
+        }
+    }
+
+# =========================================================================
+# BEGINNER LEARNING MODE & DATA RETENTION
+# =========================================================================
+
+@router.get("/learning/topics", response_model=List[LearningTopic])
+async def list_learning_topics():
+    """Returns beginner-friendly networking educational modules connected to live local network metrics."""
+    curr_ip = get_active_interface_ip()
+    curr_gw = get_default_gateway()
+    curr_lat = traffic_monitor.latest_telemetry.ping_ms if traffic_monitor.latest_telemetry else None
+    return get_learning_topics_with_context(
+        current_ip=curr_ip,
+        current_gateway=curr_gw,
+        current_latency=curr_lat
+    )
+
+@router.post("/history/cleanup")
+async def cleanup_historical_records(
+    retention_days: int = Query(default=30, ge=1, le=365),
+    db: AsyncSession = Depends(get_db)
+):
+    """Prunes time-series metrics and diagnostic results older than retention period."""
+    from datetime import timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    try:
+        del_metrics = await db.execute(delete(NetworkMetricModel).where(NetworkMetricModel.timestamp < cutoff))
+        del_pings = await db.execute(delete(PingResultModel).where(PingResultModel.created_at < cutoff))
+        del_dns = await db.execute(delete(DNSResultModel).where(DNSResultModel.created_at < cutoff))
+        await db.commit()
+        return {
+            "status": "ok",
+            "message": f"Historical data older than {retention_days} days pruned successfully.",
+            "metrics_pruned": del_metrics.rowcount if hasattr(del_metrics, "rowcount") else 0,
+            "cutoff_timestamp": cutoff.isoformat()
+        }
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to prune historical records: {str(e)}")

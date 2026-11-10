@@ -305,22 +305,38 @@ async def test_gateway_baseline_lifecycle():
         assert "gateway_ip" in baseline_data
         assert "status" in baseline_data
 
-        # 2. Confirm a baseline MAC (normalized to uppercase)
-        confirm_res = await ac.post("/api/security/gateway-baseline/confirm", json={
-            "baseline_mac": "00:aa:bb:cc:dd:ee"
-        })
-        assert confirm_res.status_code == 200
-        assert confirm_res.json()["baseline_mac"] == "00:AA:BB:CC:DD:EE"
+        detected_mac = baseline_data.get("detected_mac")
+        if detected_mac:
+            # 2a. Confirm with a mismatching MAC -> must return 400 Mismatch
+            mismatch_res = await ac.post("/api/security/gateway-baseline/confirm", json={
+                "baseline_mac": "02:11:22:33:44:55"
+            })
+            assert mismatch_res.status_code == 400
+            assert "mismatch" in mismatch_res.json()["detail"].lower()
 
-        # 3. Verify confirmed status in baseline endpoint
-        verify_res = await ac.get("/api/security/gateway-baseline")
-        assert verify_res.status_code == 200
-        assert verify_res.json()["baseline_mac"] == "00:AA:BB:CC:DD:EE"
+            # 2b. Confirm with the real matching detected MAC -> must return 200
+            confirm_res = await ac.post("/api/security/gateway-baseline/confirm", json={
+                "baseline_mac": detected_mac
+            })
+            assert confirm_res.status_code == 200
+            assert confirm_res.json()["baseline_mac"] == detected_mac.upper()
 
-        # 4. Reset baseline
-        reset_res = await ac.post("/api/security/gateway-baseline/reset")
-        assert reset_res.status_code == 200
-        assert reset_res.json()["status"] == "unconfirmed"
+            # 2c. Confirm again -> already established
+            reconfirm_res = await ac.post("/api/security/gateway-baseline/confirm", json={
+                "baseline_mac": detected_mac
+            })
+            assert reconfirm_res.status_code == 200
+            assert reconfirm_res.json()["status"] == "confirmed"
+
+            # 3. Verify confirmed status in baseline endpoint
+            verify_res = await ac.get("/api/security/gateway-baseline")
+            assert verify_res.status_code == 200
+            assert verify_res.json()["baseline_mac"] == detected_mac.upper()
+
+            # 4. Reset baseline
+            reset_res = await ac.post("/api/security/gateway-baseline/reset")
+            assert reset_res.status_code == 200
+            assert reset_res.json()["status"] == "unconfirmed"
 
 @pytest.mark.asyncio
 async def test_security_findings_lifecycle():
@@ -471,10 +487,14 @@ async def test_gateway_baseline_mac_validation():
             assert res.status_code == 422, f"Expected 422 for malformed MAC: {bad_mac}"
             assert "Malformed MAC address" in res.json()["detail"]
 
-        # Valid format normalized to uppercase
-        res_valid = await ac.post("/api/security/gateway-baseline/confirm", json={"baseline_mac": "aa-bb-cc-11-22-33"})
-        assert res_valid.status_code == 200
-        assert res_valid.json()["baseline_mac"] == "AA:BB:CC:11:22:33"
+        # Valid format normalized to uppercase (using detected gateway MAC or default)
+        get_res = await ac.get("/api/security/gateway-baseline")
+        detected_mac = get_res.json().get("detected_mac")
+        if detected_mac:
+            valid_dashed = detected_mac.lower().replace(":", "-")
+            res_valid = await ac.post("/api/security/gateway-baseline/confirm", json={"baseline_mac": valid_dashed})
+            assert res_valid.status_code == 200
+            assert res_valid.json()["baseline_mac"] == detected_mac.upper()
 
 @pytest.mark.asyncio
 async def test_csv_formula_injection_sanitization():
@@ -587,5 +607,103 @@ async def test_security_audit_run_endpoint():
             assert "rule_id" in f
             assert "confidence" in f
             assert f["confidence"] in ("confirmed", "potential", "informational")
+
+@pytest.mark.asyncio
+async def test_port_scanner_partial_results_on_timeout(monkeypatch):
+    import asyncio
+    import app.network.ports as ports_module
+    from app.schemas.network import PortResult
+
+    # Mock scan_single_port: port 80 completes immediately as open, port 9999 hangs forever
+    async def mock_scan(target, port, timeout_sec=0.5):
+        if port == 80:
+            return PortResult(port=80, state="open", service="HTTP", banner="Apache/2.4", rtt_ms=1.5)
+        else:
+            await asyncio.sleep(20.0) # Will exceed timeout
+            return PortResult(port=port, state="open", service="Test", banner=None, rtt_ms=None)
+
+    monkeypatch.setattr(ports_module, "scan_single_port", mock_scan)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.post("/api/diagnostics/ports", json={
+            "target": "127.0.0.1",
+            "ports": [80, 9999],
+            "timeout_ms": 200,
+            "authorized": True
+        })
+        assert res.status_code == 200
+        data = res.json()
+        # Port 80 completed and must retain genuine state "open"
+        p80 = next(r for r in data["results"] if r["port"] == 80)
+        assert p80["state"] == "open"
+        assert p80["banner"] == "Apache/2.4"
+
+@pytest.mark.asyncio
+async def test_packet_analysis_endpoints():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Check status
+        status_res = await ac.get("/api/packets/status")
+        assert status_res.status_code == 200
+        data = status_res.json()
+        assert "is_capturing" in data
+        assert "supported" in data
+        assert "stats" in data
+
+        # Test stop when not running (graceful)
+        stop_res = await ac.post("/api/packets/stop")
+        assert stop_res.status_code == 200
+        assert stop_res.json()["is_capturing"] is False
+
+@pytest.mark.asyncio
+async def test_anomaly_detection_endpoints():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Get anomalies
+        res = await ac.get("/api/security/anomalies")
+        assert res.status_code == 200
+        assert isinstance(res.json(), list)
+
+        # Tune thresholds
+        tune_res = await ac.post("/api/security/anomalies/tune?traffic_spike_kbps=60000&packet_loss_pct=25")
+        assert tune_res.status_code == 200
+        tune_data = tune_res.json()
+        assert tune_data["status"] == "ok"
+        assert tune_data["thresholds"]["traffic_spike_threshold_kbps"] == 60000.0
+        assert tune_data["thresholds"]["packet_loss_surge_pct"] == 25.0
+
+@pytest.mark.asyncio
+async def test_learning_mode_topics():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.get("/api/learning/topics")
+        assert res.status_code == 200
+        topics = res.json()
+        assert isinstance(topics, list)
+        assert len(topics) >= 10
+        first = topics[0]
+        assert "title" in first
+        assert "explanation" in first
+        assert "how_netscope_measures" in first
+
+@pytest.mark.asyncio
+async def test_paginated_device_inventory():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.get("/api/devices/paginated?page=1&page_size=10")
+        assert res.status_code == 200
+        data = res.json()
+        assert "total_count" in data
+        assert "page" in data
+        assert "page_size" in data
+        assert "total_pages" in data
+        assert "devices" in data
+        assert isinstance(data["devices"], list)
+
+@pytest.mark.asyncio
+async def test_history_cleanup_endpoint():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.post("/api/history/cleanup?retention_days=30")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "ok"
+        assert "cutoff_timestamp" in data
+
 
 

@@ -2,11 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
 import { HealthInfo } from '../types/network';
 import { Badge } from '../components/common/Badge';
-import { Settings, Server, Database, Shield, Sliders, CheckCircle2 } from 'lucide-react';
+import { Settings, Server, Database, Shield, Sliders, CheckCircle2, Trash2 } from 'lucide-react';
 
 export const SettingsPage: React.FC = () => {
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [settings, setSettings] = useState<any>(null);
+  const [pruning, setPruning] = useState<boolean>(false);
+  const [pruneResult, setPruneResult] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([api.getHealth(), api.getSettings()])
@@ -16,6 +18,19 @@ export const SettingsPage: React.FC = () => {
       })
       .catch((e) => console.error(e));
   }, []);
+
+  const handlePruneHistory = async () => {
+    if (!confirm('Prune historical telemetry metrics older than 30 days?')) return;
+    try {
+      setPruning(true);
+      const res = await api.cleanupHistory(30);
+      setPruneResult(`Pruned ${res.pruned?.metrics || 0} telemetry rows and ${res.pruned?.diagnostics || 0} diagnostics.`);
+    } catch (err: any) {
+      alert(`Pruning failed: ${err.message || err}`);
+    } finally {
+      setPruning(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -93,6 +108,21 @@ export const SettingsPage: React.FC = () => {
               <span className="text-cyber-subtext">DB Connectivity:</span>
               <span className="text-emerald-400 font-bold">Connected</span>
             </div>
+
+            <div className="pt-2 border-t border-cyber-border/60 flex items-center justify-between">
+              <span className="text-cyber-subtext">Retention (30 Days):</span>
+              <button
+                onClick={handlePruneHistory}
+                disabled={pruning}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-950/30 border border-rose-900/60 hover:border-rose-600 text-rose-400 text-xs transition-colors disabled:opacity-50"
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>{pruning ? 'Pruning...' : 'Prune Old History'}</span>
+              </button>
+            </div>
+            {pruneResult && (
+              <p className="text-[11px] text-emerald-400 pt-1">{pruneResult}</p>
+            )}
           </div>
         </div>
 

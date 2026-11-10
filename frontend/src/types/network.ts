@@ -201,3 +201,59 @@ export interface TelemetryPayload {
   interface: string;
   is_connected: boolean;
 }
+
+export interface AnomalyEvent {
+  id?: number;
+  type: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  title: string;
+  description: string;
+  evidence: Record<string, any>;
+  detected_at: string;
+}
+
+export interface AnomalyThresholds {
+  throughput_spike_multiplier?: number;
+  packet_loss_surge_pct?: number;
+  unknown_device_burst_count?: number;
+  latency_spike_multiplier?: number;
+}
+
+export interface PacketCaptureStatus {
+  is_running: boolean;
+  total_captured: number;
+  protocol_distribution: Record<string, number>;
+  top_conversations: { src: string; dst: string; protocol: string; packets: number; bytes: number }[];
+  recent_packets: {
+    timestamp: string;
+    protocol: string;
+    src_ip: string;
+    dst_ip: string;
+    src_port: number | null;
+    dst_port: number | null;
+    length: number;
+    summary: string;
+  }[];
+  start_time: string | null;
+  error: string | null;
+}
+
+export interface LearningTopic {
+  id: string;
+  title: string;
+  category: string;
+  difficulty: 'beginner' | 'intermediate' | 'advanced';
+  summary: string;
+  explanation: string;
+  key_takeaways: string[];
+  live_metric_key?: string | null;
+}
+
+export interface PaginatedDevicesResponse {
+  items: DiscoveredDevice[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+

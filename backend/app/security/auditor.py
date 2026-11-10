@@ -28,6 +28,10 @@ class SecurityAuditor:
             self.ip_mac_history.setdefault(ip, set()).add(clean_mac)
             self.last_observation_by_ip[ip] = clean_mac
 
+    def record_device_history(self, ip: str, mac: str):
+        """Forwarding alias for record_ip_mac_observation to support device persistence hooks."""
+        self.record_ip_mac_observation(ip, mac)
+
     def load_history_from_devices(self, devices: List[Any]):
         """Recovers historical IP-to-MAC observations from database devices upon server startup."""
         for d in devices:

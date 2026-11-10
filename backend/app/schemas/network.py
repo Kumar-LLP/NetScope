@@ -12,11 +12,15 @@ class HealthResponse(BaseModel):
 class InterfaceSchema(BaseModel):
     name: str
     ip_address: Optional[str] = None
+    ipv6_address: Optional[str] = None
     netmask: Optional[str] = None
+    broadcast: Optional[str] = None
     mac_address: Optional[str] = None
     is_default: bool = False
     is_up: bool = True
     speed_mbps: Optional[int] = None
+    interface_type: Optional[str] = "ethernet" # 'ethernet', 'wifi', 'loopback', 'virtual', 'vpn'
+    index: Optional[int] = None
 
 class OverviewResponse(BaseModel):
     active_interface: Optional[str] = None
@@ -131,6 +135,8 @@ class DNSResponse(BaseModel):
     resolved_by: str
     query_time_ms: float
     records: Dict[str, List[str]] = {}
+    status: str = "success" # 'success', 'no_answer', 'nxdomain', 'timeout', 'resolver_error'
+    statuses_by_type: Dict[str, str] = {}
 
 class TracerouteRequest(BaseModel):
     target: str = Field(..., min_length=1, max_length=255)
@@ -148,6 +154,8 @@ class TracerouteResponse(BaseModel):
     target: str
     total_hops: int
     hops: List[TracerouteHop]
+    status: str = "completed" # 'completed', 'timed_out', 'error'
+    error_message: Optional[str] = None
 
 class IPInfoRequest(BaseModel):
     ip_or_cidr: str = Field(..., min_length=3, max_length=45)
@@ -157,6 +165,8 @@ class IPInfoResponse(BaseModel):
     ip_version: int
     network_address: str
     netmask: str
+    wildcard_mask: Optional[str] = None
+    prefix_length: Optional[int] = None
     broadcast_address: Optional[str] = None
     usable_host_range: List[str]
     total_hosts: int
@@ -191,7 +201,7 @@ class PortScanRequest(BaseModel):
 
 class PortResult(BaseModel):
     port: int
-    state: str # 'open', 'closed', 'filtered'
+    state: str # 'open', 'closed', 'filtered', 'error', 'not_scanned', 'timed_out'
     service: Optional[str] = None
     banner: Optional[str] = None
     rtt_ms: Optional[float] = None
@@ -201,6 +211,61 @@ class PortScanResponse(BaseModel):
     total_scanned: int
     open_count: int
     results: List[PortResult]
+    status: str = "completed" # 'completed', 'partial', 'timed_out', 'cancelled'
+    requested_ports: Optional[int] = None
+    completed_ports: Optional[int] = None
+    remaining_ports: Optional[int] = 0
+    elapsed_seconds: Optional[float] = None
+    timed_out: bool = False
+
+class PaginatedDevicesResponse(BaseModel):
+    total_count: int
+    page: int
+    page_size: int
+    total_pages: int
+    devices: List[DeviceSchema]
+
+class PacketStats(BaseModel):
+    total_packets: int = 0
+    tcp_packets: int = 0
+    udp_packets: int = 0
+    icmp_packets: int = 0
+    dns_packets: int = 0
+    other_packets: int = 0
+    total_bytes: int = 0
+    protocols: Dict[str, int] = {}
+    duration_seconds: float = 0.0
+
+class PacketCaptureStatusResponse(BaseModel):
+    is_capturing: bool = False
+    supported: bool = True
+    session_id: Optional[str] = None
+    interface_name: Optional[str] = None
+    stats: PacketStats
+    note: Optional[str] = None
+
+class AnomalySchema(BaseModel):
+    id: Optional[int] = None
+    anomaly_type: str # 'traffic_spike', 'gateway_mac_change', 'unknown_device', 'excessive_latency'
+    severity: str # 'critical', 'high', 'medium', 'low'
+    title: str
+    description: str
+    evidence: str
+    target: Optional[str] = None
+    confidence: str = "confirmed" # 'confirmed', 'potential'
+    threshold_trigger: Optional[str] = None
+    detected_at: Optional[datetime] = None
+    status: str = "active" # 'active', 'investigating', 'resolved', 'false_positive'
+
+class LearningTopic(BaseModel):
+    id: str
+    title: str
+    category: str
+    summary: str
+    explanation: str
+    how_netscope_measures: str
+    current_value: Optional[str] = None
+    recommended_reading: Optional[str] = None
 
 class SecurityFindingSchema(BaseModel):
     id: Optional[int] = None

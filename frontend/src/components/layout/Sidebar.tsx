@@ -48,7 +48,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="flex items-center gap-1.5">
             <span className="font-bold text-lg text-cyber-text tracking-wide">NetScope</span>
             <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-400 border border-cyan-800/60 font-semibold">
-              v1.0
+              v1.3.0
             </span>
           </div>
           <p className="text-[11px] text-cyber-subtext font-mono truncate">NOC & Threat Intelligence</p>

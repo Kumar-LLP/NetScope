@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useTelemetry } from '../hooks/useTelemetry';
 import { api } from '../services/api';
-import { NetworkInterface } from '../types/network';
+import { NetworkInterface, PacketCaptureStatus } from '../types/network';
 import { StatCard } from '../components/common/StatCard';
 import { Badge } from '../components/common/Badge';
 import {
@@ -16,7 +16,10 @@ import {
   Wifi,
   Server,
   Zap,
-  Percent
+  Percent,
+  Play,
+  Square,
+  ShieldAlert
 } from 'lucide-react';
 import {
   AreaChart,
@@ -35,6 +38,8 @@ export const TrafficAnalyticsPage: React.FC = () => {
   const [selectedInterface, setSelectedInterface] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(true);
   const [switching, setSwitching] = useState<boolean>(false);
+  const [packetStatus, setPacketStatus] = useState<PacketCaptureStatus | null>(null);
+  const [captureLoading, setCaptureLoading] = useState<boolean>(false);
 
   const downloadBlob = (blob: Blob, filename: string) => {
     const url = window.URL.createObjectURL(blob);
@@ -60,6 +65,51 @@ export const TrafficAnalyticsPage: React.FC = () => {
       console.error(e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchPacketStatus = async () => {
+    try {
+      const status = await api.getPacketCaptureStatus();
+      setPacketStatus(status);
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    fetchPacketStatus();
+  }, []);
+
+  useEffect(() => {
+    let interval: any;
+    if (packetStatus?.is_running) {
+      interval = setInterval(fetchPacketStatus, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [packetStatus?.is_running]);
+
+  const handleStartCapture = async () => {
+    try {
+      setCaptureLoading(true);
+      await api.startPacketCapture(500);
+      await fetchPacketStatus();
+    } catch (err: any) {
+      alert(`Capture failed: ${err.message || err}`);
+    } finally {
+      setCaptureLoading(false);
+    }
+  };
+
+  const handleStopCapture = async () => {
+    try {
+      setCaptureLoading(true);
+      await api.stopPacketCapture();
+      await fetchPacketStatus();
+    } catch (err: any) {
+      alert(`Stop failed: ${err.message || err}`);
+    } finally {
+      setCaptureLoading(false);
     }
   };
 
@@ -270,6 +320,107 @@ export const TrafficAnalyticsPage: React.FC = () => {
             </BarChart>
           </ResponsiveContainer>
         </div>
+      </div>
+
+      {/* Packet Inspection & Protocol Distribution Engine */}
+      <div className="bg-cyber-card border border-cyber-border rounded-xl p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-cyber-border pb-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <Layers className="w-4 h-4 text-cyber-cyan" />
+              <h3 className="text-sm font-semibold text-cyber-text">Real-Time Packet & Protocol Inspection</h3>
+              {packetStatus?.is_running && (
+                <span className="flex items-center gap-1 text-[10px] font-mono text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2 py-0.5 rounded">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                  CAPTURING
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-cyber-subtext mt-0.5">
+              Opt-in non-invasive network layer telemetry • Zero payload inspection • Windows Raw Socket / Scapy
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {!packetStatus?.is_running ? (
+              <button
+                onClick={handleStartCapture}
+                disabled={captureLoading}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyber-cyan text-black font-semibold text-xs hover:bg-cyber-cyan/90 transition-colors disabled:opacity-50"
+              >
+                <Play className="w-3.5 h-3.5" />
+                <span>Start Capture (500 Pkts)</span>
+              </button>
+            ) : (
+              <button
+                onClick={handleStopCapture}
+                disabled={captureLoading}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600 text-white font-semibold text-xs hover:bg-rose-500 transition-colors disabled:opacity-50"
+              >
+                <Square className="w-3.5 h-3.5" />
+                <span>Stop Capture</span>
+              </button>
+            )}
+            <button
+              onClick={fetchPacketStatus}
+              className="p-1.5 rounded-lg bg-cyber-surface border border-cyber-border hover:text-cyber-cyan text-cyber-subtext text-xs"
+              title="Refresh capture state"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {packetStatus?.error && (
+          <div className="p-3 rounded-lg bg-rose-950/20 border border-rose-800/40 text-xs text-rose-300 flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 shrink-0" />
+            <span>{packetStatus.error}</span>
+          </div>
+        )}
+
+        {/* Protocol Distribution Grid */}
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          {['TCP', 'UDP', 'ICMP', 'DNS', 'OTHER'].map((proto) => {
+            const count = packetStatus?.protocol_distribution?.[proto] || 0;
+            const total = packetStatus?.total_captured || 0;
+            const pct = total > 0 ? ((count / total) * 100).toFixed(1) : '0';
+            return (
+              <div key={proto} className="bg-cyber-surface border border-cyber-border/70 rounded-lg p-3 text-center">
+                <span className="text-[10px] font-mono text-cyber-subtext uppercase block">{proto}</span>
+                <span className="text-base font-mono font-bold text-cyber-text mt-0.5 block">{count}</span>
+                <span className="text-[10px] font-mono text-cyber-cyan">{pct}%</span>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Recent Packets Stream */}
+        {packetStatus?.recent_packets && packetStatus.recent_packets.length > 0 && (
+          <div className="space-y-2 mt-4">
+            <div className="text-[11px] font-mono text-cyber-subtext uppercase tracking-wider flex items-center justify-between">
+              <span>Recent Packets (Headers Only)</span>
+              <span>Total Captured: {packetStatus.total_captured}</span>
+            </div>
+            <div className="max-h-56 overflow-y-auto space-y-1 font-mono text-[11px] border border-cyber-border rounded-lg p-2 bg-black/40">
+              {packetStatus.recent_packets.slice(0, 20).map((pkt, idx) => (
+                <div key={idx} className="flex items-center justify-between py-1 px-2 rounded hover:bg-cyber-surface/60 border-b border-cyber-border/30 last:border-b-0">
+                  <div className="flex items-center gap-2">
+                    <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-cyan-950 text-cyan-400 border border-cyan-800/40">
+                      {pkt.protocol}
+                    </span>
+                    <span className="text-cyber-text">{pkt.src_ip}{pkt.src_port ? `:${pkt.src_port}` : ''}</span>
+                    <span className="text-cyber-subtext">→</span>
+                    <span className="text-cyber-cyan">{pkt.dst_ip}{pkt.dst_port ? `:${pkt.dst_port}` : ''}</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-slate-500 text-[10px]">
+                    <span>{pkt.length} B</span>
+                    <span>{new Date(pkt.timestamp).toLocaleTimeString()}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

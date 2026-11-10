@@ -12,7 +12,12 @@ import {
   TracerouteResponse,
   IPInfoResponse,
   PortScanResponse,
-  SecurityFinding
+  SecurityFinding,
+  AnomalyEvent,
+  AnomalyThresholds,
+  PacketCaptureStatus,
+  LearningTopic,
+  PaginatedDevicesResponse
 } from '../types/network';
 
 const API_BASE = (import.meta as any).env?.VITE_API_URL || '/api';
@@ -286,6 +291,86 @@ export const api = {
   async getSettings(): Promise<any> {
     const res = await fetch(`${API_BASE}/settings`);
     if (!res.ok) throw new Error('Failed to fetch settings');
+    return res.json();
+  },
+
+  async getPaginatedDevices(params?: {
+    page?: number;
+    pageSize?: number;
+    search?: string;
+    status?: string;
+    vendor?: string;
+    category?: string;
+    sortBy?: string;
+  }): Promise<PaginatedDevicesResponse> {
+    const q = new URLSearchParams();
+    if (params?.page) q.append('page', params.page.toString());
+    if (params?.pageSize) q.append('page_size', params.pageSize.toString());
+    if (params?.search) q.append('search', params.search);
+    if (params?.status) q.append('status', params.status);
+    if (params?.vendor) q.append('vendor', params.vendor);
+    if (params?.category) q.append('category', params.category);
+    if (params?.sortBy) q.append('sort_by', params.sortBy);
+
+    const res = await fetch(`${API_BASE}/devices/paginated?${q.toString()}`);
+    if (!res.ok) throw new Error('Failed to fetch paginated devices');
+    return res.json();
+  },
+
+  async getAnomalies(limit: number = 50, severity?: string): Promise<AnomalyEvent[]> {
+    const q = new URLSearchParams({ limit: limit.toString() });
+    if (severity) q.append('severity', severity);
+    const res = await fetch(`${API_BASE}/security/anomalies?${q.toString()}`);
+    if (!res.ok) throw new Error('Failed to fetch anomalies');
+    return res.json();
+  },
+
+  async tuneAnomalyThresholds(thresholds: AnomalyThresholds): Promise<{ status: string; thresholds: AnomalyThresholds }> {
+    const res = await fetch(`${API_BASE}/security/anomalies/tune`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(thresholds)
+    });
+    if (!res.ok) throw new Error('Failed to tune anomaly thresholds');
+    return res.json();
+  },
+
+  async getPacketCaptureStatus(): Promise<PacketCaptureStatus> {
+    const res = await fetch(`${API_BASE}/packets/status`);
+    if (!res.ok) throw new Error('Failed to fetch packet capture status');
+    return res.json();
+  },
+
+  async startPacketCapture(maxPackets: number = 500): Promise<{ status: string; message: string }> {
+    const res = await fetch(`${API_BASE}/packets/start?max_packets=${maxPackets}`, {
+      method: 'POST'
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to start packet capture' }));
+      throw new Error(err.detail || 'Failed to start packet capture');
+    }
+    return res.json();
+  },
+
+  async stopPacketCapture(): Promise<{ status: string; message: string }> {
+    const res = await fetch(`${API_BASE}/packets/stop`, {
+      method: 'POST'
+    });
+    if (!res.ok) throw new Error('Failed to stop packet capture');
+    return res.json();
+  },
+
+  async getLearningTopics(): Promise<{ topics: LearningTopic[]; categories: string[] }> {
+    const res = await fetch(`${API_BASE}/learning/topics`);
+    if (!res.ok) throw new Error('Failed to fetch learning topics');
+    return res.json();
+  },
+
+  async cleanupHistory(retentionDays: number = 30): Promise<{ status: string; message: string; pruned: any }> {
+    const res = await fetch(`${API_BASE}/history/cleanup?retention_days=${retentionDays}`, {
+      method: 'POST'
+    });
+    if (!res.ok) throw new Error('Failed to prune database history');
     return res.json();
   }
 };

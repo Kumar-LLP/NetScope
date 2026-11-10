@@ -133,12 +133,12 @@ cd backend
 .\.venv\Scripts\pytest.exe tests/ -v
 ```
 
-### Verified Test Results (30 / 30 Passed - 100%):
+### Verified Test Results (36 / 36 Passed - 100%):
 - `test_health_endpoint`: **PASSED** (Verifies FastAPI lifespan and SQLite WAL connectivity).
 - `test_interfaces_endpoint`: **PASSED** (Verifies physical/virtual NIC enumeration via psutil).
 - `test_overview_endpoint`: **PASSED** (Verifies health score calculation and gateway routing).
 - `test_ip_info_calculator`: **PASSED** (Verifies IPv4 CIDR binary decomposition and usable host range).
-- `test_port_scan_unauthorized_rejected`: **PASSED** (Verifies HTTP 403 Forbidden when unauthorized).
+- `test_port_scan_unauthorized_rejected`: **PASSED** (Verifies HTTP 400 when unauthorized).
 - `test_port_scan_authorized_loopback`: **PASSED** (Verifies socket connect scanner on 127.0.0.1:8000).
 - `test_security_findings_endpoint`: **PASSED** (Verifies security rule evaluation SEC-001 through SEC-009).
 - `test_stop_scan_and_progress_endpoints`: **PASSED** (Verifies scan cancellation token and async progress reporting).
@@ -164,20 +164,29 @@ cd backend
 - `test_interface_selection_validation`: **PASSED** (Verifies server-side 404/400 validation for nonexistent or down adapters).
 - `test_ip_info_binary_host_representation`: **PASSED** (Verifies mathematical accuracy of binary host IP visualization vs network address).
 - `test_security_audit_run_endpoint`: **PASSED** (Verifies explicit security audit evaluation with confirmed/potential confidence ratings).
+- `test_port_scanner_partial_results_on_timeout`: **PASSED** (Verifies preservation of finished ports when scan times out).
+- `test_packet_analysis_endpoints`: **PASSED** (Verifies packet capture status, start, and stop routines).
+- `test_anomaly_detection_endpoints`: **PASSED** (Verifies network anomaly queries and threshold tuning).
+- `test_learning_mode_topics`: **PASSED** (Verifies educational topics linked to live telemetry keys).
+- `test_paginated_device_inventory`: **PASSED** (Verifies server-side pagination, search, and sorting).
+- `test_history_cleanup_endpoint`: **PASSED** (Verifies retention cleanup of old metrics and diagnostics).
 
 ---
 
-## 📋 QA, Security & Technical Documentation
+## 📋 Comprehensive Technical Documentation Suite
 
-For in-depth architectural and validation reports, refer to the documentation suite in `docs/`:
-- [Architecture Blueprint](docs/ARCHITECTURE.md)
-- [API Design Specification](docs/API_DESIGN.md)
-- [Database Schema (SQLAlchemy + Alembic)](docs/DATABASE_SCHEMA.md)
-- [Development Plan & Roadmap](docs/DEVELOPMENT_PLAN.md)
-- [Comprehensive QA Report](docs/QA_REPORT.md)
-- [Application Security Audit](docs/SECURITY_AUDIT.md)
-- [Automated Test Execution Log](docs/TEST_RESULTS.md)
-- [Technical Limitations & OS Boundaries](docs/KNOWN_LIMITATIONS.md)
+For complete architectural specifications, API schemas, and security reports:
+- [🚀 Installation & Setup Guide](INSTALLATION.md)
+- [📖 User & Operations Guide](USER_GUIDE.md)
+- [📐 Architecture Blueprint](ARCHITECTURE.md)
+- [📡 REST & WebSocket API Specification](API_DOCUMENTATION.md)
+- [🛡️ Security Audit & Threat Model](SECURITY_AUDIT.md)
+- [⚠️ Known Limitations & Boundaries](KNOWN_LIMITATIONS.md)
+- [🗄️ Database Architecture & Migrations](DATABASE.md)
+- [🧪 Testing & QA Automation Guide](TESTING.md)
+- [📊 Test Execution Log (36/36 Passed)](TEST_RESULTS.md)
+- [🤝 Contributing Guidelines](CONTRIBUTING.md)
+- [📝 Project Changelog](CHANGELOG.md)
 
 ---
 

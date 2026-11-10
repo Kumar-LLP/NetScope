@@ -9,6 +9,8 @@ from app.models.entities import (
     PortDiagnosticModel,
     SecurityFindingModel,
     ApplicationSettingsModel,
+    PacketCaptureSessionModel,
+    NetworkAnomalyModel,
 )
 
 __all__ = [
@@ -22,4 +24,6 @@ __all__ = [
     "PortDiagnosticModel",
     "SecurityFindingModel",
     "ApplicationSettingsModel",
+    "PacketCaptureSessionModel",
+    "NetworkAnomalyModel",
 ]

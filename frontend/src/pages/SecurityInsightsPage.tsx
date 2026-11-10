@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
-import { SecurityFinding, GatewayBaselineResponse } from '../types/network';
+import { SecurityFinding, GatewayBaselineResponse, AnomalyEvent } from '../types/network';
 import { Badge } from '../components/common/Badge';
 import {
   ShieldAlert,
@@ -19,6 +19,7 @@ import {
 export const SecurityInsightsPage: React.FC = () => {
   const [findings, setFindings] = useState<SecurityFinding[]>([]);
   const [baseline, setBaseline] = useState<GatewayBaselineResponse | null>(null);
+  const [anomalies, setAnomalies] = useState<AnomalyEvent[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<'active' | 'acknowledged' | 'resolved' | 'all'>('active');
@@ -39,14 +40,16 @@ export const SecurityInsightsPage: React.FC = () => {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [findingsData, baselineData] = await Promise.all([
+      const [findingsData, baselineData, anomaliesData] = await Promise.all([
         statusFilter === 'all' || statusFilter === 'acknowledged' || statusFilter === 'resolved'
           ? api.getSecurityFindingsHistory(200)
           : api.getSecurityFindings(),
-        api.getGatewayBaseline()
+        api.getGatewayBaseline(),
+        api.getAnomalies(20).catch(() => [] as AnomalyEvent[])
       ]);
       setFindings(findingsData);
       setBaseline(baselineData);
+      setAnomalies(anomaliesData);
     } catch (err) {
       console.error('Failed to load security insights data:', err);
     } finally {
@@ -316,6 +319,37 @@ export const SecurityInsightsPage: React.FC = () => {
           <div className="text-xl font-mono font-bold text-cyber-cyan mt-1">{findings.length}</div>
         </div>
       </div>
+
+      {/* Real-time Network Anomaly Detections */}
+      {anomalies.length > 0 && (
+        <div className="bg-cyber-card border border-amber-900/40 rounded-xl p-5 space-y-3">
+          <div className="flex items-center justify-between border-b border-cyber-border pb-3">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-400" />
+              <h3 className="text-sm font-semibold text-cyber-text">Heuristic Network Anomalies ({anomalies.length})</h3>
+            </div>
+            <span className="text-[10px] font-mono text-amber-400 uppercase tracking-wider bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/60">
+              Rule-Based Detection Engine
+            </span>
+          </div>
+          <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+            {anomalies.map((anom, idx) => (
+              <div key={anom.id || idx} className="p-2.5 rounded-lg bg-cyber-surface border border-cyber-border/70 flex items-start justify-between text-xs">
+                <div>
+                  <div className="flex items-center gap-2 font-mono">
+                    <span className="text-amber-300 font-semibold">{anom.title}</span>
+                    <span className="text-[10px] uppercase text-cyber-subtext">[{anom.type}]</span>
+                  </div>
+                  <p className="text-cyber-subtext text-[11px] mt-0.5">{anom.description}</p>
+                </div>
+                <span className="text-[10px] font-mono text-slate-500 whitespace-nowrap ml-4">
+                  {new Date(anom.detected_at).toLocaleTimeString()}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Status Filter Tabs */}
       <div className="flex items-center gap-2 border-b border-cyber-border pb-2 text-xs">

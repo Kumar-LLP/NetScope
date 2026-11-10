@@ -202,11 +202,11 @@ async def scan_single_port(
             rtt_ms=None
         )
     except Exception as e:
-        # Distinguish unexpected socket errors from standard closed ports
-        err_msg = str(e)
+        err_msg = str(e).lower()
+        state = "closed" if "refused" in err_msg else ("filtered" if "timed out" in err_msg or "timeout" in err_msg else "error")
         return PortResult(
             port=port,
-            state="closed" if "refused" in err_msg.lower() else "filtered",
+            state=state,
             service=service_name,
             banner=None,
             rtt_ms=None
@@ -220,7 +220,8 @@ async def run_port_scan(
 ) -> PortScanResponse:
     """
     Coordinates multi-threaded TCP port scan across specified ports with concurrency limiting,
-    active scan throttles, and strict server-side target authorization enforcement.
+    active scan throttles, strict server-side target authorization enforcement, and preservation
+    of partial results upon overall scan timeout or cancellation.
     """
     global _active_port_scans, _port_scan_lock
 
@@ -251,31 +252,82 @@ async def run_port_scan(
         timeout_sec = max(0.1, min(timeout_ms / 1000.0, 3.0))
 
         semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_PORT_SCANS)
+        completed_results: Dict[int, PortResult] = {}
+        overall_timed_out = False
 
         async def sem_scan(p: int):
             async with semaphore:
-                return await scan_single_port(resolved_ip, p, timeout_sec)
+                res = await scan_single_port(resolved_ip, p, timeout_sec)
+                completed_results[p] = res
+                return res
 
-        tasks = [sem_scan(p) for p in target_ports]
+        task_dict = {p: asyncio.create_task(sem_scan(p)) for p in target_ports}
         start_time = time.perf_counter()
 
         try:
-            # Bounded scan execution with overall timeout (maximum 15 seconds)
-            results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=15.0)
-        except asyncio.TimeoutError:
-            # Preserve partial results on timeout
-            results = [
-                PortResult(port=p, state="filtered", service=COMMON_SERVICES.get(p, f"Port {p}"), banner=None, rtt_ms=None)
-                for p in target_ports
-            ]
+            # Overall scan deadline: maximum 15.0 seconds
+            done, pending = await asyncio.wait(
+                task_dict.values(),
+                timeout=15.0,
+                return_when=asyncio.ALL_COMPLETED
+            )
+            if pending:
+                overall_timed_out = True
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+        except asyncio.CancelledError:
+            for t in task_dict.values():
+                t.cancel()
+            raise
 
-        open_count = sum(1 for r in results if r.state == "open")
+        elapsed_sec = round(time.perf_counter() - start_time, 2)
+
+        # Assemble results preserving all completed scans and marking unfinished ports distinctly
+        final_results: List[PortResult] = []
+        for p in target_ports:
+            if p in completed_results:
+                final_results.append(completed_results[p])
+            elif overall_timed_out:
+                final_results.append(
+                    PortResult(
+                        port=p,
+                        state="timed_out",
+                        service=COMMON_SERVICES.get(p, f"Port {p}"),
+                        banner=None,
+                        rtt_ms=None
+                    )
+                )
+            else:
+                final_results.append(
+                    PortResult(
+                        port=p,
+                        state="not_scanned",
+                        service=COMMON_SERVICES.get(p, f"Port {p}"),
+                        banner=None,
+                        rtt_ms=None
+                    )
+                )
+
+        open_count = sum(1 for r in final_results if r.state == "open")
+        total_completed = len(completed_results)
+        remaining = len(target_ports) - total_completed
+
+        status_str = "completed"
+        if overall_timed_out:
+            status_str = "timed_out" if total_completed == 0 else "partial"
 
         return PortScanResponse(
             target=target,
-            total_scanned=len(results),
+            total_scanned=len(final_results),
             open_count=open_count,
-            results=results
+            results=final_results,
+            status=status_str,
+            requested_ports=len(target_ports),
+            completed_ports=total_completed,
+            remaining_ports=remaining,
+            elapsed_seconds=elapsed_sec,
+            timed_out=overall_timed_out
         )
     finally:
         async with _port_scan_lock:

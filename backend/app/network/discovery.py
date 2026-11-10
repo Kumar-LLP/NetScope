@@ -133,13 +133,19 @@ def get_arp_table(target_network: Optional[ipaddress.IPv4Network] = None) -> Dic
             if match:
                 ip = match.group(1)
                 mac = match.group(2).replace("-", ":").upper()
-                if not mac.startswith("FF:FF") and not ip.startswith("224.") and not ip.startswith("239.") and not ip.endswith(".255"):
-                    if target_network is not None:
-                        try:
-                            if ipaddress.IPv4Address(ip) not in target_network:
-                                continue
-                        except Exception:
+                if not mac.startswith("FF:FF") and not mac == "00:00:00:00:00:00":
+                    try:
+                        ip_obj = ipaddress.IPv4Address(ip)
+                        if ip_obj.is_multicast or ip_obj.is_loopback:
                             continue
+                        if target_network is not None:
+                            if ip_obj not in target_network:
+                                continue
+                            # Exclude true network and broadcast addresses for this specific subnet size
+                            if ip_obj == target_network.broadcast_address or ip_obj == target_network.network_address:
+                                continue
+                    except Exception:
+                        continue
                     arp_entries[ip] = mac
     except Exception:
         pass
