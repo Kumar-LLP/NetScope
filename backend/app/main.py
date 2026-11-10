@@ -11,8 +11,46 @@ from app.monitoring.traffic import traffic_monitor
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize SQLite WAL database and launch background traffic monitor
+    # Startup: Initialize SQLite WAL database and seed devices into memory & auditor
     await init_db()
+    try:
+        from app.core.database import AsyncSessionLocal
+        from app.models.entities import NetworkDeviceModel
+        from app.security.auditor import security_auditor
+        from app.api.endpoints import _cached_devices
+        from app.schemas.network import DeviceSchema
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(NetworkDeviceModel))
+            db_devs = res.scalars().all()
+            security_auditor.load_history_from_devices([
+                {"ip": d.ip_address, "mac": d.mac_address, "first_seen": d.first_seen}
+                for d in db_devs
+            ])
+            _cached_devices.clear()
+            _cached_devices.extend([
+                DeviceSchema(
+                    id=d.id,
+                    ip=d.ip_address,
+                    mac=d.mac_address,
+                    vendor=d.vendor or "Unknown",
+                    hostname=d.hostname,
+                    custom_name=d.custom_name,
+                    notes=d.notes,
+                    category=d.category or "workstation",
+                    is_trusted=d.is_trusted,
+                    is_gateway=d.is_gateway,
+                    is_local_host=d.is_local_host,
+                    status=d.status,
+                    first_seen=d.first_seen,
+                    last_seen=d.last_seen
+                )
+                for d in db_devs
+            ])
+    except Exception:
+        pass
+
     monitor_task = asyncio.create_task(traffic_monitor.start_loop())
     yield
     # Shutdown: Stop traffic monitor cleanly

@@ -58,6 +58,8 @@ async def init_db():
                 s_cols = {row[1] for row in res.fetchall()}
                 if "target" not in s_cols:
                     sync_conn.execute(text("ALTER TABLE security_findings ADD COLUMN target VARCHAR(255)"))
+                if "confidence" not in s_cols:
+                    sync_conn.execute(text("ALTER TABLE security_findings ADD COLUMN confidence VARCHAR(32) DEFAULT 'potential'"))
                 if "acknowledged_at" not in s_cols:
                     sync_conn.execute(text("ALTER TABLE security_findings ADD COLUMN acknowledged_at DATETIME"))
                 if "resolved_at" not in s_cols:

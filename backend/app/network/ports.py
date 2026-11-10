@@ -43,78 +43,99 @@ def is_target_authorized_scope(target: str) -> Tuple[bool, str, str]:
     """
     Validates that the target falls strictly within authorized local scopes:
     loopback, local adapter IP, active interface subnet, or explicitly configured targets.
+    Resolves all A and AAAA DNS records and verifies EVERY resolved address to prevent
+    DNS rebinding and TOCTOU attacks. Pins the validated numeric IP for connection.
     Rejects public external WAN addresses and unrelated foreign private subnets.
-    Returns: (is_authorized, resolved_ip, reason)
+    Returns: (is_authorized, pinned_numeric_ip, reason)
     """
     clean_target = target.strip()
     if not clean_target:
         return False, "", "Target address is empty."
 
-    # Explicitly authorized targets from settings
-    if clean_target.lower() in [t.lower() for t in settings.AUTHORIZED_TARGETS]:
-        # Resolve loopback or configured target
-        try:
-            resolved = socket.gethostbyname(clean_target)
-            return True, resolved, "Target is explicitly authorized in system settings."
-        except Exception:
-            return True, clean_target, "Target is explicitly authorized in system settings."
-
-    # Resolve hostname/IP (supports IPv4 and IPv6)
+    # 1. Resolve all A and AAAA records (supports both IPv4 and IPv6)
     try:
-        addrinfo = socket.getaddrinfo(clean_target, None)
+        addrinfo = socket.getaddrinfo(clean_target, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
         if not addrinfo:
             return False, "", f"Could not resolve host '{clean_target}'."
-        resolved_ip = addrinfo[0][4][0]
+        # Extract unique resolved IP addresses in order
+        resolved_ips = list(dict.fromkeys(item[4][0] for item in addrinfo))
     except Exception as e:
-        return False, "", f"Could not resolve host '{clean_target}': {str(e)}"
+        return False, "", f"DNS resolution failed for host '{clean_target}': {str(e)}"
 
-    try:
-        ip_obj = ipaddress.ip_address(resolved_ip)
-    except ValueError as e:
-        return False, resolved_ip, f"Invalid IP address '{resolved_ip}': {str(e)}"
+    if not resolved_ips:
+        return False, "", f"No IP addresses resolved for host '{clean_target}'."
 
-    # 1. Allow loopback (127.0.0.1, ::1)
-    if ip_obj.is_loopback:
-        return True, resolved_ip, "Loopback target is authorized."
+    # 2. Check explicitly authorized targets configuration
+    is_explicit_host = clean_target.lower() in [t.lower() for t in settings.AUTHORIZED_TARGETS]
 
-    # 2. Reject public external WAN addresses immediately
-    if not (ip_obj.is_private or ip_obj.is_link_local):
-        return False, resolved_ip, (
-            f"Target '{clean_target}' resolves to public WAN address '{resolved_ip}'. "
-            "External scanning is prohibited by security policy. Only local and private targets are permitted."
-        )
-
-    # 3. Check if target matches any active local interface IP
+    # Pre-fetch active interfaces and authorized networks once
     try:
         interfaces = get_network_interfaces()
-        for iface in interfaces:
-            if iface.ip_address and iface.ip_address == resolved_ip:
-                return True, resolved_ip, "Local adapter IP is authorized."
-
-            # Check if target falls within active interface subnet
-            if iface.ip_address and iface.netmask and iface.is_up:
-                try:
-                    iface_net = ipaddress.IPv4Network(f"{iface.ip_address}/{iface.netmask}", strict=False)
-                    if ip_obj.version == 4 and ipaddress.IPv4Address(resolved_ip) in iface_net:
-                        return True, resolved_ip, "Target is within active local network interface subnet."
-                except Exception:
-                    continue
     except Exception:
-        pass
+        interfaces = []
 
-    # 4. Check explicitly configured authorized networks
+    auth_subnets: List[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
     for net_str in settings.AUTHORIZED_NETWORKS:
         try:
-            auth_net = ipaddress.ip_network(net_str.strip(), strict=False)
-            if ip_obj in auth_net:
-                return True, resolved_ip, "Target is within configured authorized network range."
+            auth_subnets.append(ipaddress.ip_network(net_str.strip(), strict=False))
         except Exception:
             continue
 
-    return False, resolved_ip, (
-        f"Target '{clean_target}' ({resolved_ip}) is not within any active local interface subnet "
-        "or explicitly authorized scopes."
-    )
+    # Helper function to check a single IP address
+    def check_single_ip(resolved_ip: str) -> Tuple[bool, str]:
+        try:
+            ip_obj = ipaddress.ip_address(resolved_ip)
+        except ValueError as err:
+            return False, f"Invalid IP address '{resolved_ip}': {str(err)}"
+
+        # Allow loopback (127.0.0.1, ::1)
+        if ip_obj.is_loopback:
+            return True, "Loopback target is authorized."
+
+        # If explicitly authorized in settings and is private/loopback, permit
+        if is_explicit_host and (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local):
+            return True, f"Target '{clean_target}' is explicitly authorized in system settings."
+
+        # Reject public external WAN addresses immediately
+        if not (ip_obj.is_private or ip_obj.is_link_local):
+            return False, (
+                f"Target '{clean_target}' resolves to public WAN address '{resolved_ip}'. "
+                "External scanning is prohibited by security policy. Only local and private targets are permitted."
+            )
+
+        # Check if target matches any active local interface IP
+        for iface in interfaces:
+            if iface.ip_address and iface.ip_address == resolved_ip:
+                return True, "Local adapter IP is authorized."
+
+            # Check if target falls within active interface subnet
+            if iface.ip_address and iface.netmask and iface.is_up and ip_obj.version == 4:
+                try:
+                    iface_net = ipaddress.IPv4Network(f"{iface.ip_address}/{iface.netmask}", strict=False)
+                    if ipaddress.IPv4Address(resolved_ip) in iface_net:
+                        return True, "Target is within active local network interface subnet."
+                except Exception:
+                    continue
+
+        # Check explicitly configured authorized networks
+        for auth_net in auth_subnets:
+            if ip_obj in auth_net:
+                return True, "Target is within configured authorized network range."
+
+        return False, (
+            f"Target '{clean_target}' ({resolved_ip}) is not within any active local interface subnet "
+            "or explicitly authorized scopes."
+        )
+
+    # 3. Validate EVERY resolved address to prevent DNS rebinding
+    for ip in resolved_ips:
+        ip_auth, ip_reason = check_single_ip(ip)
+        if not ip_auth:
+            return False, ip, f"DNS Rebinding / Scope Protection: {ip_reason}"
+
+    # 4. Pin the first validated numeric IP for connection
+    pinned_ip = resolved_ips[0]
+    return True, pinned_ip, f"Target is authorized (pinned to validated IP: {pinned_ip})."
 
 async def grab_banner(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, port: int) -> Optional[str]:
     """

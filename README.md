@@ -34,8 +34,10 @@
 - 🏢 **Local IEEE OUI Vendor Database**: Offline manufacturer resolution (Apple, Intel, TP-Link, Cisco, Lenovo, Samsung, Dell, etc.) with zero cloud dependency.
 - 🕸️ **Interactive Dynamic Topology**: Interactive React Flow network canvas rendering draggable nodes, animated bezier data lines, and node inspection drawers.
 - 🧰 **Diagnostic Suite**: Genuine system ICMP Ping, multi-record DNS resolution (A, AAAA, MX, NS, TXT, CNAME), Traceroute hop discovery, and IPv4 CIDR subnetting calculator.
-- 🎯 **Controlled Port Scanner**: Multi-threaded TCP connect port scanner with predefined service profiles (Top 20, Web, Databases, Remote CLI), banner grabbing, and authorization confirmation guardrails.
-- 🛡️ **Automated Security Insights**: Heuristic analysis engine detecting unexpected gateway MAC changes (potential ARP spoofing), duplicate IP conflicts, and unencrypted management services (Telnet 23, FTP 21).
+- 🎯 **Controlled Port Scanner**: Multi-threaded TCP connect port scanner with anti-rebinding DNS validation, IP pinning, predefined service profiles (Top 20, Web, Databases, Remote CLI), banner grabbing, and authorization confirmation guardrails.
+- 🛡️ **Automated Security Insights**: Heuristic analysis engine with structured confidence ratings detecting gateway MAC changes (ARP poisoning risk), duplicate IP conflicts, and unencrypted management services (Telnet 23, FTP 21).
+- 🔒 **Defense-in-Depth & CWE-1236 Protection**: Neutralizes Spreadsheet Formula Injection across CSV exports, validates MAC address structures, and prevents internal configuration disclosure.
+- ⚡ **Dynamic Code Splitting**: Frontend route chunking with `React.lazy()` and `<React.Suspense>` for lightning-fast sub-second initial dashboard loads.
 - 📡 **Real-Time WebSocket Stream**: Live telemetry pushed every 1.5 seconds over `/ws/network` directly into high-contrast dark NOC charts powered by Recharts.
 - 🎓 **Beginner Learning Mode**: Built-in interactive networking guide explaining IP, MAC, DNS, Gateway, Subnet, Ports, Latency, and TCP/UDP.
 
@@ -131,7 +133,7 @@ cd backend
 .\.venv\Scripts\pytest.exe tests/ -v
 ```
 
-### Verified Test Results (23 / 23 Passed - 100%):
+### Verified Test Results (30 / 30 Passed - 100%):
 - `test_health_endpoint`: **PASSED** (Verifies FastAPI lifespan and SQLite WAL connectivity).
 - `test_interfaces_endpoint`: **PASSED** (Verifies physical/virtual NIC enumeration via psutil).
 - `test_overview_endpoint`: **PASSED** (Verifies health score calculation and gateway routing).
@@ -155,6 +157,13 @@ cd backend
 - `test_interface_selection`: **PASSED** (Verifies runtime switching of monitored network interface adapter).
 - `test_report_exports`: **PASSED** (Verifies downloadable CSV and JSON exports for devices, security, and history).
 - `test_topology_read_only`: **PASSED** (Verifies read-only topology graph generation without triggering unexpected scans).
+- `test_gateway_baseline_mac_validation`: **PASSED** (Verifies strict 6-byte hexadecimal regex validation and uppercase MAC normalization).
+- `test_csv_formula_injection_sanitization`: **PASSED** (Verifies neutralization of CWE-1236 Spreadsheet Formula Injection via single quote prefix).
+- `test_dns_rebinding_rejected`: **PASSED** (Verifies anti-rebinding TOCTOU protection by rejecting dual-stack resolutions containing WAN IPs).
+- `test_settings_endpoint_no_information_disclosure`: **PASSED** (Verifies omission of internal database credentials and scanning bounds from `/api/settings`).
+- `test_interface_selection_validation`: **PASSED** (Verifies server-side 404/400 validation for nonexistent or down adapters).
+- `test_ip_info_binary_host_representation`: **PASSED** (Verifies mathematical accuracy of binary host IP visualization vs network address).
+- `test_security_audit_run_endpoint`: **PASSED** (Verifies explicit security audit evaluation with confirmed/potential confidence ratings).
 
 ---
 

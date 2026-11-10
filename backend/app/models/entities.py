@@ -152,6 +152,7 @@ class SecurityFindingModel(Base):
     impact = Column(Text, nullable=False)
     remediation = Column(Text, nullable=False)
     target = Column(String(255), nullable=True)
+    confidence = Column(String(32), default="potential") # 'confirmed', 'potential', 'informational'
     status = Column(String(32), default="active") # 'active', 'acknowledged', 'resolved'
     created_at = Column(DateTime, default=utcnow)
     acknowledged_at = Column(DateTime, nullable=True)

@@ -31,14 +31,17 @@ NetScope is intentionally engineered to operate **without requiring Windows Admi
 ## 2. Subnet Discovery & LAN Sweeping Limits
 
 ### Scope Boundaries (/24 Default) & Interface Subnet Scoping
-* The automated device discovery sweeper restricts single-run active sweeps to `/24` subnets (maximum 254 candidate IP addresses).
-* Attempting to actively sweep `/16` (65,534 hosts) or `/8` (16,777,214 hosts) subnets would cause local Wi-Fi router buffer bloat and excessive ARP table churn.
+* The automated device discovery sweeper restricts single-run active sweeps to `/24` subnets (maximum 254 candidate IP addresses). Subnet masks larger than `/24` are rejected with HTTP 422 to avoid network congestion.
 * **Strict Interface Scope Boundary**: NetScope strictly enforces that target subnets must be attached to an active local network interface. Probing arbitrary or foreign RFC 1918 subnets (e.g., `10.254.254.0/24` when the host is only attached to `192.168.1.0/24`) is rejected with HTTP 403 Forbidden. Operators requiring multi-homed or routed scanning can declare subnets in `AUTHORIZED_NETWORKS` in `.env`.
+* **Evidence-Based Device Status**: Hosts confirmed responsive to ICMP/TCP probes during sweeps are marked `status = "online"`. Hosts identified only via operating system ARP tables that fail to respond to active probes are accurately marked `status = "stale"`, reflecting passive cache entries rather than verified active transceivers.
 
 ### Hostname Reverse DNS (PTR) Delays
 * On consumer routers or unmanaged Wi-Fi access points, many IoT devices and mobile phones do not register PTR records in local DNS.
 * Synchronous reverse DNS calls on Windows can block for several seconds per non-responsive host.
 * **NetScope Mitigation**: Hostname resolution is offloaded to asynchronous background worker threads with an enforced 200ms timeout per candidate host, preventing discovery stalls.
+
+### TOCTOU DNS Rebinding & Anti-Spoofing Scoping
+* Diagnostic port scanning resolves all A/AAAA records for hostnames and pins the validated numeric IP. Any resolution yielding an external public address aborts the scan immediately to prevent DNS rebinding attacks.
 
 ---
 

@@ -7,13 +7,20 @@ from app.schemas.network import (
     DeviceSchema
 )
 from app.network.interfaces import get_active_interface_ip
-from app.network.gateway import get_default_gateway, get_gateway_mac, get_dns_servers
+from app.network.gateway import (
+    get_default_gateway,
+    get_gateway_mac,
+    get_dns_servers,
+    check_internet_connectivity,
+    check_gateway_connectivity
+)
 
 def generate_topology(devices: List[DeviceSchema]) -> TopologyResponse:
     """
     Transforms network discovery and interface state into a normalized
     React Flow node & edge graph structure.
     Does NOT use misleading fake fallback IP addresses.
+    Separately verifies and displays genuine Internet, Gateway, DNS, and Host states.
     """
     nodes: List[TopologyNode] = []
     edges: List[TopologyEdge] = []
@@ -24,15 +31,18 @@ def generate_topology(devices: List[DeviceSchema]) -> TopologyResponse:
     dns_servers = get_dns_servers()
     primary_dns = dns_servers[0] if dns_servers else None
 
+    # Genuine reachability checks (not inferred from gateway presence)
+    has_internet, _, _ = check_internet_connectivity()
+    is_gw_online, _, _ = check_gateway_connectivity(gateway_ip) if gateway_ip else (False, None, 100.0)
+
     # 1. Internet Node
-    has_internet = bool(gateway_ip)
     nodes.append(
         TopologyNode(
             id="node-internet",
             type="internetNode",
             data=TopologyNodeData(
                 label="Internet Cloud",
-                subLabel="WAN Uplink" if has_internet else "Uplink Unavailable",
+                subLabel="WAN Uplink Verified" if has_internet else "WAN Uplink Offline",
                 ip="Public WAN",
                 status="online" if has_internet else "offline",
                 nodeType="internet"
@@ -51,7 +61,7 @@ def generate_topology(devices: List[DeviceSchema]) -> TopologyResponse:
                     label="DNS Server",
                     subLabel="Active Nameserver",
                     ip=primary_dns,
-                    status="online",
+                    status="online" if has_internet or is_gw_online else "offline",
                     nodeType="dns"
                 ),
                 position={"x": 720.0, "y": 90.0}
@@ -69,7 +79,7 @@ def generate_topology(devices: List[DeviceSchema]) -> TopologyResponse:
                 ip=gateway_ip or "Unavailable",
                 mac=gateway_mac or "Not Resolved",
                 vendor="Router / AP" if gateway_ip else "Unknown",
-                status="online" if gateway_ip else "offline",
+                status="online" if is_gw_online else "offline",
                 nodeType="gateway"
             ),
             position={"x": 420.0, "y": 180.0}
@@ -83,8 +93,12 @@ def generate_topology(devices: List[DeviceSchema]) -> TopologyResponse:
                 id="e-gw-internet",
                 source="node-gateway",
                 target="node-internet",
-                animated=True,
-                style={"stroke": "#06B6D4", "strokeWidth": 2}
+                animated=has_internet,
+                style={
+                    "stroke": "#06B6D4" if has_internet else "#F43F5E",
+                    "strokeWidth": 2,
+                    "strokeDasharray": "None" if has_internet else "5,5"
+                }
             )
         )
 

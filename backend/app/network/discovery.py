@@ -224,7 +224,7 @@ async def discover_devices(
             if up_iface and up_iface.ip_address:
                 target_cidr, _ = calculate_cidr(up_iface.ip_address, up_iface.netmask)
             else:
-                target_cidr = "192.168.1.0/24"
+                raise ValueError("No active local network interface with an assigned IPv4 address was detected. Please specify the target CIDR explicitly.")
 
     try:
         network = ipaddress.IPv4Network(target_cidr.strip(), strict=False)
@@ -331,7 +331,11 @@ async def discover_devices(
     now = datetime.now(timezone.utc)
 
     for ip_str in candidate_ips:
-        if ip_str.startswith("127.") or ip_str.endswith(".255"):
+        try:
+            ip_obj = ipaddress.IPv4Address(ip_str)
+            if ip_obj.is_loopback or ip_obj == network.broadcast_address or ip_obj == network.network_address:
+                continue
+        except Exception:
             continue
 
         mac = refreshed_arp.get(ip_str)
@@ -342,6 +346,12 @@ async def discover_devices(
         hostname = hostname_map.get(ip_str)
         rtt = alive_ips.get(ip_str)
 
+        # Evidence-based status: online only if confirmed responding to probes, or local/gateway
+        if ip_str in alive_ips or is_local or is_gw:
+            status_val = "online"
+        else:
+            status_val = "stale"
+
         devices.append(
             DeviceSchema(
                 ip=ip_str,
@@ -350,7 +360,7 @@ async def discover_devices(
                 hostname=hostname,
                 is_gateway=is_gw,
                 is_local_host=is_local,
-                status="online",
+                status=status_val,
                 response_time_ms=rtt,
                 first_seen=now,
                 last_seen=now,
@@ -360,7 +370,10 @@ async def discover_devices(
     duration = round(time.perf_counter() - start_time, 2)
     return DeviceDiscoverResponse(
         scan_id=scan_id,
+        total_targets=session.total_hosts,
+        total_scanned=session.scanned_hosts,
         total_discovered=len(devices),
         duration_seconds=duration,
+        status=session.status,
         devices=devices
     )

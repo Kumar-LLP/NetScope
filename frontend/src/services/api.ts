@@ -190,6 +190,14 @@ export const api = {
     return res.json();
   },
 
+  async runSecurityAudit(): Promise<SecurityFinding[]> {
+    const res = await fetch(`${API_BASE}/security/audit/run`, {
+      method: 'POST'
+    });
+    if (!res.ok) throw new Error('Failed to run security audit');
+    return res.json();
+  },
+
   async getSecurityFindings(): Promise<SecurityFinding[]> {
     const res = await fetch(`${API_BASE}/security/findings`);
     if (!res.ok) throw new Error('Failed to fetch security findings');

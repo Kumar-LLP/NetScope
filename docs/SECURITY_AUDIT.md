@@ -18,9 +18,11 @@ NetScope is designed as a hybrid network diagnostic tool and cybersecurity audit
 3. **Foreign Private Subnet Reconnaissance**: Probing arbitrary RFC 1918 subnets outside the host's active local interface network.
 4. **Subnet Flooding & DoS**: Flooding internal subnets through oversized CIDR sweeps (e.g. `/16` or `/8`).
 5. **Gateway ARP Poisoning & MITM Attacks**: Untrusted initial baseline trusting a compromised attacker during ARP spoofing.
-6. **SQL Injection & Data Tampering**: Manipulation of SQLite database records storing metrics and audit logs.
-7. **Cross-Origin & Reverse Proxy Exposure**: Unrestricted cross-origin requests or misconfigured Docker reverse proxies.
-8. **Credential & Secret Leakage**: Accidental inclusion of API keys, private certificates, or internal tokens.
+6. **DNS Rebinding Attacks (TOCTOU)**: Exploiting hostnames that resolve to both authorized local and unauthorized public targets.
+7. **Spreadsheet Formula Injection (CWE-1236)**: Malicious hostnames or device labels triggering formula execution upon CSV export in spreadsheet applications.
+8. **Information Exposure via Configuration APIs**: Accidental leakage of internal database URLs or authorized subnet filters.
+9. **SQL Injection & Data Tampering**: Manipulation of SQLite database records storing metrics and audit logs.
+10. **Cross-Origin & Reverse Proxy Exposure**: Unrestricted cross-origin requests or misconfigured Docker reverse proxies.
 
 ---
 
@@ -45,83 +47,53 @@ NetScope is designed as a hybrid network diagnostic tool and cybersecurity audit
   - Auto-trusting the initial observed Gateway MAC is vulnerable if an ARP poisoner is already active when the application starts.
   - In NetScope, the detected gateway MAC is initially marked **`unconfirmed`** (`SEC-001-INFO`).
   - The human operator must explicitly inspect the MAC (verifying it against physical router labels or configuration) and click **"Confirm Baseline"** via `POST /api/security/gateway-baseline/confirm`.
-  - Once confirmed, any divergence between the confirmed baseline and active ARP tables immediately triggers a **CRITICAL severity alert (`SEC-001`)**.
+  - Once confirmed, any divergence between the confirmed baseline and active ARP tables immediately triggers a **CRITICAL severity alert (`SEC-001`)** with `confirmed` confidence.
   - Operators can reset or re-baseline at any time via `POST /api/security/gateway-baseline/reset`.
+  - Strict input validation requires standard 6-byte hexadecimal format via regex `^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$` and normalizes MACs to uppercase.
 
-### 2.3 Security Finding Persistence & Lifecycle Management
+### 2.3 Anti-Rebinding DNS Pinning & Scope Validation
+* To defeat Time-of-Check to Time-of-Use (TOCTOU) DNS Rebinding attacks, hostnames submitted for port scanning are resolved comprehensively using `socket.getaddrinfo`.
+* If **ANY** resolved IP address points to an unauthorized public WAN or foreign IP address, the entire scan request is rejected immediately with HTTP 403 Forbidden.
+* Once verified, the validated numeric IP is pinned and passed strictly to the socket connection routines, preventing secondary DNS resolutions from pointing elsewhere.
+
+### 2.4 Spreadsheet Formula Injection Sanitization (CWE-1236)
+* Exported reports (devices, security findings, and scan history) pass all fields through `sanitize_csv_field()`.
+* If any string value begins with dangerous spreadsheet execution prefixes (`=`, `+`, `-`, `@`, `\t`, `\r`, `\n`), it is prepended with a single apostrophe `'`.
+* This ensures that spreadsheet applications treat the values strictly as literal strings rather than executable expressions or DDE formulas.
+
+### 2.5 Information Disclosure Elimination in Settings
+* `GET /api/settings` strips sensitive internal operational state (`authorized_networks`, `authorized_targets`, `database_url`, `cors_origins`).
+* Only safe public operational parameters (`project_name`, `version`, `environment`, `telemetry_interval`, `max_concurrent_port_scans`) are returned to clients.
+
+### 2.6 Security Finding Persistence & Lifecycle Management
 * **Database Models & Endpoints**:
   - Findings are persisted in the SQLite `security_findings` table with unique constraint on `(rule_id, title, status)`.
   - Supports operator workflow:
+    - `POST /api/security/audit/run`: Explicitly triggers heuristic evaluation and updates persistent findings.
+    - `GET /api/security/findings`: Purely read-only access to active findings in SQLite.
     - `POST /api/security/findings/{id}/acknowledge`: Marks active finding as acknowledged.
     - `POST /api/security/findings/{id}/resolve`: Marks finding as resolved.
     - `GET /api/security/findings/history`: Audits complete chronological finding history with filtering by status and severity.
 
-### 2.4 HTTP Security Headers Middleware
-* **Implementation in `main.py`**:
-  - Automatically appends standard OWASP defensive headers on every response:
-    - `X-Content-Type-Options: nosniff`
-    - `X-Frame-Options: DENY`
-    - `X-XSS-Protection: 1; mode=block`
-    - `Referrer-Policy: strict-origin-when-cross-origin`
-    - `Permissions-Policy: geolocation=(), camera=(), microphone=()`
-
-### 2.5 Strict Port Boundary & Input Validation
-* **Implementation in `schemas/network.py`**:
-  - `@field_validator("ports")` strictly validates that every requested port number is an integer in the range `1 <= port <= 65535`. Port 0, negative values, and values > 65535 are rejected with HTTP 422.
-  - `@field_validator("target")` strips input and rejects control characters and shell metacharacters.
-
-### 2.6 Zero-Shell Execution Architecture
-* **Rule**: The parameter `shell=True` is strictly prohibited throughout the codebase.
-* **Implementation**: All system process invocations (`subprocess.run` or `asyncio.create_subprocess_exec`) utilize strictly tokenized argument vectors:
-  ```python
-  cmd = ["ping", "-n", str(count), "-w", str(timeout_ms), target]
-  proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-  ```
-  Even if shell metacharacters (`&`, `;`, `|`, `` ` ``, `$`) are passed into `target`, the OS treats them as literal command arguments.
-
-### 2.7 Mathematical IP Calculator (Zero Memory Exhaustion)
-* **Implementation in `diagnostics.py`**:
-  - Calculates host counts, usable ranges, and broadcast addresses purely mathematically without generating lists of addresses in memory.
-  - Fully supports `/0`, `/8`, `/16`, `/24`, `/31` (RFC 3021 point-to-point 2-host links), `/32` (single host), and IPv6 prefixes (`/64`, `/128`).
-
-### 2.8 Docker Port Hardening & Reverse Proxy Architecture
-* **Loopback Binding in `docker-compose.yml`**:
-  - Backend is bound strictly to `127.0.0.1:8000:8000`.
-  - Frontend is bound strictly to `127.0.0.1:5173:80`.
-  - Prevents unintended exposure of the backend daemon to external LAN adapters without an authenticating proxy.
-* **Reverse Proxy in `frontend/nginx.conf`**:
-  - `/api/` proxied to `http://backend:8000/api/` with proxy headers and 60s timeout.
-  - `/ws/` proxied to `http://backend:8000/ws/` with HTTP/1.1 Upgrade headers (`Upgrade $http_upgrade`, `Connection "upgrade"`) and 86400s timeout.
+### 2.7 HTTP Security Headers Middleware
+* `X-Content-Type-Options: nosniff`
+* `X-Frame-Options: DENY`
+* `X-XSS-Protection: 1; mode=block`
+* `Referrer-Policy: strict-origin-when-cross-origin`
+* `Permissions-Policy: geolocation=(), camera=(), microphone=()`
 
 ---
 
-## 3. Automated Heuristic Rules Engine (SEC-001 to SEC-009)
+## 3. Heuristic Rules & Confidence Matrix
 
-| Rule Code | Threat Description | Detection Logic | Severity |
-| :--- | :--- | :--- | :---: |
-| **SEC-001** | Gateway ARP Spoofing | Confirmed gateway MAC baseline mismatch against active ARP table. | **CRITICAL** |
-| **SEC-001-INFO** | Unconfirmed Baseline | Gateway MAC detected but unconfirmed by human operator. | **INFO** |
-| **SEC-002** | Duplicate IP Conflicts | Conflicting distinct MAC addresses claiming identical IP address. | **HIGH** |
-| **SEC-003** | Rogue DNS Resolver | Upstream DNS server pointing to untrusted external unencrypted IP. | **LOW** |
-| **SEC-004** | Cleartext Telnet Listener | Port 23 active with unencrypted terminal banner. | **CRITICAL** |
-| **SEC-005** | Cleartext FTP Listener | Port 21 active without mandatory TLS encryption. | **MEDIUM** |
-| **SEC-006** | Database Exposure | Database port open on network (1433, 1521, 3306, 5432, 6379, 27017). | **HIGH** |
-| **SEC-007** | Gateway Admin HTTP | Router management interface open on HTTP without forced HTTPS redirect. | **MEDIUM** |
-| **SEC-008** | Windows SMB Exposure | SMB port 445 / 139 active on network interface. | **MEDIUM** |
-| **SEC-009** | Remote Desktop Exposure | RDP port 3389 active without VPN encapsulation. | **MEDIUM** |
-
----
-
-## 4. Secrets, Credentials & Dependency Scan
-
-1. **Hardcoded Secrets**: None. Zero passwords, tokens, API keys, or private certificates exist in source files.
-2. **Environment Variables**: Managed via `pydantic-settings` from `.env` with safe defaults; `.env` excluded in `.gitignore`.
-3. **CORS Policy**: Restricts origins to localhost and local network development ports.
-
----
-
-## 5. Security Audit Conclusion
-
-NetScope implements defense-in-depth security principles. Server-side authorization prevents abuse, input validation prevents command injection and memory exhaustion, operator baseline confirmation protects against ARP spoofing, and Docker loopback binding ensures safe container execution.
-
-**Final Assessment: APPROVED FOR DEPLOYMENT**
+| Rule ID | Name | Severity | Confidence Logic |
+| :--- | :--- | :--- | :--- |
+| **SEC-001** | Gateway ARP Baseline Divergence | CRITICAL | Confirmed when active MAC diverges from operator baseline |
+| **SEC-002** | IP Address Conflict / Spoofing | HIGH | Confirmed when multiple active MACs report identical IP simultaneously; informational when historical |
+| **SEC-003** | Public WAN Interface Exposure | HIGH | Confirmed when host adapter IP is outside RFC 1918 and loopback |
+| **SEC-004** | Insecure Legacy Telnet Service | HIGH | Confirmed on port 23 response |
+| **SEC-005** | Cleartext FTP Authentication | HIGH | Confirmed on port 21 response |
+| **SEC-006** | Unencrypted Web HTTP Exposure | MEDIUM | Potential on open port 80 / 8080 |
+| **SEC-007** | SMB File Sharing Exposure | MEDIUM | Potential on open port 445 |
+| **SEC-008** | Legacy NetBIOS Exposure | LOW | Potential on open port 139 |
+| **SEC-009** | Remote Desktop Protocol Exposure | LOW | Potential on open port 3389 |

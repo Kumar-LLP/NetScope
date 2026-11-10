@@ -54,6 +54,18 @@ export const SecurityInsightsPage: React.FC = () => {
     }
   };
 
+  const handleRerunAudit = async () => {
+    try {
+      setLoading(true);
+      await api.runSecurityAudit();
+      await loadData();
+    } catch (err) {
+      console.error('Failed to rerun security audit:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadData();
   }, [statusFilter]);
@@ -163,7 +175,7 @@ export const SecurityInsightsPage: React.FC = () => {
           </div>
 
           <button
-            onClick={loadData}
+            onClick={handleRerunAudit}
             disabled={loading}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-cyber-card border border-cyber-border hover:border-cyber-cyan text-xs font-medium text-cyber-text transition-colors disabled:opacity-50"
           >

@@ -102,9 +102,9 @@ class TrafficMonitor:
     async def broadcast(self, message: TelemetryMessage):
         payload = message.model_dump_json()
         dead_connections = set()
-        for conn in self.active_connections:
+        for conn in list(self.active_connections):
             try:
-                await conn.send_text(payload)
+                await asyncio.wait_for(conn.send_text(payload), timeout=1.0)
             except Exception:
                 dead_connections.add(conn)
         for dead in dead_connections:
@@ -179,9 +179,9 @@ class TrafficMonitor:
                 self._last_nic_counters = current_nic_counters
                 self._last_time = current_time
 
-                # 2. Genuine connectivity & latency checks
-                is_net_online, icmp_latency, packet_loss = check_internet_connectivity()
-                tcp_latency = measure_tcp_connect_latency("1.1.1.1", 53, 0.3)
+                # 2. Genuine connectivity & latency checks (offloaded to thread pool to avoid blocking event loop)
+                is_net_online, icmp_latency, packet_loss = await asyncio.to_thread(check_internet_connectivity)
+                tcp_latency = await asyncio.to_thread(measure_tcp_connect_latency, "1.1.1.1", 53, 0.3)
 
                 now_iso = datetime.now(timezone.utc).isoformat()
 

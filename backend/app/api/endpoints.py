@@ -5,6 +5,8 @@ import time
 import io
 import csv
 import json
+import re
+import ipaddress
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, Body
@@ -67,6 +69,20 @@ from app.security.auditor import security_auditor
 
 router = APIRouter()
 
+MAC_REGEX = re.compile(r"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$")
+
+def sanitize_csv_field(val: Any) -> str:
+    """
+    Sanitizes values against Spreadsheet Formula Injection (CWE-1236).
+    Prepends a single apostrophe if a field starts with dangerous formula operators.
+    """
+    if val is None:
+        return ""
+    str_val = str(val).strip()
+    if str_val and str_val[0] in ('=', '+', '-', '@', '\t', '\r', '\n'):
+        return "'" + str_val
+    return str_val
+
 # In-memory runtime caches
 _cached_devices: List[DeviceSchema] = []
 _last_open_ports: List[Dict[str, Any]] = []
@@ -95,9 +111,26 @@ async def list_interfaces():
 
 @router.post("/network/interfaces/select")
 async def select_interface_for_monitoring(payload: SelectInterfaceRequest):
-    """Sets a specific network adapter as the primary source for live telemetry sampling."""
-    traffic_monitor.set_selected_interface(payload.interface_name)
-    return {"status": "ok", "selected_interface": payload.interface_name}
+    """Sets a specific network adapter as the primary source for live telemetry sampling with server-side validation."""
+    req_name = payload.interface_name.strip()
+    if not req_name:
+        raise HTTPException(status_code=400, detail="Interface name cannot be empty.")
+
+    available_interfaces = get_network_interfaces()
+    target_iface = next((i for i in available_interfaces if i.name.lower() == req_name.lower()), None)
+    if not target_iface:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Network interface '{req_name}' not found on host. Available: {[i.name for i in available_interfaces]}"
+        )
+    if not target_iface.is_up:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Network interface '{target_iface.name}' is currently disconnected or down."
+        )
+
+    traffic_monitor.set_selected_interface(target_iface.name)
+    return {"status": "ok", "selected_interface": target_iface.name}
 
 @router.get("/network/overview", response_model=OverviewResponse)
 async def get_overview():
@@ -198,7 +231,6 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    _cached_devices = result.devices
     elapsed_duration = round(time.perf_counter() - start_time, 2)
 
     # Persist scan metadata in database
@@ -207,26 +239,57 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
             id=result.scan_id,
             scan_type="device_discovery",
             target_range=payload.cidr or "auto-detected",
-            status="completed",
-            total_targets=result.total_discovered,
+            status=result.status,
+            total_targets=result.total_targets,
             found_targets=result.total_discovered,
-            duration_seconds=elapsed_duration
+            duration_seconds=result.duration_seconds or elapsed_duration
         )
         db.add(scan_record)
 
+        discovered_ips = {dev.ip for dev in result.devices}
+
+        # Subnet-aware offline marking:
+        # If target subnet was specified or discovered, mark existing stored devices in that subnet not seen in this sweep as offline
+        scanned_net = None
+        target_subnet_str = payload.cidr
+        if target_subnet_str:
+            try:
+                scanned_net = ipaddress.ip_network(target_subnet_str, strict=False)
+            except Exception:
+                pass
+
+        all_stored_res = await db.execute(select(NetworkDeviceModel))
+        all_stored = all_stored_res.scalars().all()
+        for stored in all_stored:
+            if stored.ip_address not in discovered_ips:
+                try:
+                    dev_ip_obj = ipaddress.ip_address(stored.ip_address)
+                    if scanned_net and dev_ip_obj in scanned_net:
+                        stored.status = "offline"
+                except Exception:
+                    pass
+
         # Upsert discovered devices and record ScanResultModel rows
         for dev in result.devices:
-            query = select(NetworkDeviceModel).where(NetworkDeviceModel.ip_address == dev.ip)
-            res = await db.execute(query)
-            existing = res.scalars().first()
+            # Reconcile: First by MAC (handles DHCP IP changes without unique constraint violations), then by IP
+            existing = None
+            if dev.mac:
+                mac_clean = dev.mac.strip().upper()
+                res = await db.execute(select(NetworkDeviceModel).where(NetworkDeviceModel.mac_address == mac_clean))
+                existing = res.scalars().first()
+
+            if not existing:
+                res = await db.execute(select(NetworkDeviceModel).where(NetworkDeviceModel.ip_address == dev.ip))
+                existing = res.scalars().first()
 
             device_id = None
             now = datetime.now(timezone.utc)
             if existing:
                 existing.last_seen = now
-                existing.status = "online"
+                existing.status = dev.status
+                existing.ip_address = dev.ip  # Handle DHCP IP reassignments seamlessly
                 if dev.mac:
-                    existing.mac_address = dev.mac
+                    existing.mac_address = dev.mac.strip().upper()
                 if dev.hostname:
                     existing.hostname = dev.hostname
                 if dev.vendor and dev.vendor != "Unknown":
@@ -235,12 +298,12 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
             else:
                 new_dev = NetworkDeviceModel(
                     ip_address=dev.ip,
-                    mac_address=dev.mac,
+                    mac_address=dev.mac.strip().upper() if dev.mac else None,
                     vendor=dev.vendor,
                     hostname=dev.hostname,
                     is_gateway=dev.is_gateway,
                     is_local_host=dev.is_local_host,
-                    status="online",
+                    status=dev.status,
                     first_seen=now,
                     last_seen=now
                 )
@@ -257,7 +320,32 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
             )
             db.add(scan_item)
 
+            # Record in security auditor history for ARP spoofing / DHCP tracking
+            security_auditor.record_device_history(dev.ip, dev.mac)
+
         await db.commit()
+
+        # Update cached devices from persistent database
+        res_all = await db.execute(select(NetworkDeviceModel).order_by(NetworkDeviceModel.ip_address.asc()))
+        _cached_devices = [
+            DeviceSchema(
+                id=d.id,
+                ip=d.ip_address,
+                mac=d.mac_address,
+                vendor=d.vendor or "Unknown",
+                hostname=d.hostname,
+                custom_name=d.custom_name,
+                notes=d.notes,
+                category=d.category or "workstation",
+                is_trusted=d.is_trusted,
+                is_gateway=d.is_gateway,
+                is_local_host=d.is_local_host,
+                status=d.status,
+                first_seen=d.first_seen,
+                last_seen=d.last_seen
+            )
+            for d in res_all.scalars().all()
+        ]
     except Exception:
         await db.rollback()
 
@@ -533,7 +621,7 @@ async def confirm_gateway_baseline(
     payload: Optional[Dict[str, Any]] = Body(None),
     db: AsyncSession = Depends(get_db)
 ):
-    """Explicitly confirms the gateway MAC as the trusted baseline."""
+    """Explicitly confirms the gateway MAC as the trusted baseline with strict format validation."""
     gw_ip = get_default_gateway()
     detected_mac = get_gateway_mac(gw_ip) if gw_ip else None
     
@@ -546,6 +634,14 @@ async def confirm_gateway_baseline(
     if not mac_to_confirm:
         raise HTTPException(status_code=400, detail="Cannot confirm baseline: No active gateway MAC detected or provided.")
 
+    # Strict MAC address format validation (AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF)
+    if not MAC_REGEX.match(mac_to_confirm):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Malformed MAC address '{mac_to_confirm}'. Expected standard 6-byte hexadecimal format (e.g. AA:BB:CC:DD:EE:FF)."
+        )
+
+    mac_to_confirm = mac_to_confirm.replace("-", ":").upper()
     now_iso = datetime.now(timezone.utc).isoformat()
 
     # Upsert settings
@@ -603,13 +699,32 @@ async def reset_gateway_baseline(db: AsyncSession = Depends(get_db)):
 # SECURITY FINDINGS & LIFECYCLE MANAGEMENT
 # =========================================================================
 
-@router.get("/security/findings", response_model=List[SecurityFindingSchema])
-async def list_security_findings(db: AsyncSession = Depends(get_db)):
-    """
-    Evaluates active network state against security heuristics,
-    persists newly discovered findings, and returns active findings.
-    """
+async def _execute_security_audit(db: AsyncSession) -> List[SecurityFindingSchema]:
     global _cached_devices, _last_open_ports
+
+    current_devices = _cached_devices
+    if not current_devices:
+        res = await db.execute(select(NetworkDeviceModel))
+        db_devs = res.scalars().all()
+        current_devices = [
+            DeviceSchema(
+                id=d.id,
+                ip=d.ip_address,
+                mac=d.mac_address,
+                vendor=d.vendor or "Unknown",
+                hostname=d.hostname,
+                custom_name=d.custom_name,
+                notes=d.notes,
+                category=d.category or "workstation",
+                is_trusted=d.is_trusted,
+                is_gateway=d.is_gateway,
+                is_local_host=d.is_local_host,
+                status=d.status,
+                first_seen=d.first_seen,
+                last_seen=d.last_seen
+            )
+            for d in db_devs
+        ]
 
     # Load baseline settings
     res_mac = await db.execute(select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "gateway_baseline_mac"))
@@ -626,7 +741,7 @@ async def list_security_findings(db: AsyncSession = Depends(get_db)):
 
     # Run auditor
     evaluated_findings = security_auditor.audit_environment(
-        devices=_cached_devices,
+        devices=current_devices,
         open_ports=_last_open_ports,
         confirmed_baseline_mac=confirmed_mac,
         baseline_status=baseline_status,
@@ -649,6 +764,7 @@ async def list_security_findings(db: AsyncSession = Depends(get_db)):
 
             if existing:
                 existing.evidence = f.evidence
+                existing.confidence = f.confidence
                 f.id = existing.id
                 f.status = existing.status
             else:
@@ -662,6 +778,7 @@ async def list_security_findings(db: AsyncSession = Depends(get_db)):
                     impact=f.impact,
                     remediation=f.remediation,
                     target=f.target,
+                    confidence=f.confidence,
                     status="active"
                 )
                 db.add(new_finding)
@@ -673,6 +790,51 @@ async def list_security_findings(db: AsyncSession = Depends(get_db)):
         await db.rollback()
 
     return evaluated_findings
+
+@router.post("/security/audit/run", response_model=List[SecurityFindingSchema])
+async def trigger_security_audit(db: AsyncSession = Depends(get_db)):
+    """
+    Explicitly triggers security audit heuristic evaluation across devices and open ports,
+    persists new findings to the database, and returns the findings list.
+    """
+    return await _execute_security_audit(db)
+
+@router.get("/security/findings", response_model=List[SecurityFindingSchema])
+async def list_security_findings(db: AsyncSession = Depends(get_db)):
+    """
+    Returns active security findings strictly read-only from the persistent database.
+    """
+    query = (
+        select(SecurityFindingModel)
+        .where(SecurityFindingModel.status == "active")
+        .order_by(SecurityFindingModel.created_at.desc())
+    )
+    res = await db.execute(query)
+    findings = res.scalars().all()
+
+    if not findings:
+        return await _execute_security_audit(db)
+
+    return [
+        SecurityFindingSchema(
+            id=f.id,
+            rule_id=f.rule_id,
+            severity=f.severity,
+            title=f.title,
+            category=f.category,
+            description=f.description,
+            evidence=f.evidence,
+            impact=f.impact,
+            remediation=f.remediation,
+            target=f.target,
+            confidence=f.confidence or "potential",
+            status=f.status,
+            created_at=f.created_at,
+            acknowledged_at=f.acknowledged_at,
+            resolved_at=f.resolved_at
+        )
+        for f in findings
+    ]
 
 @router.get("/security/findings/history", response_model=List[SecurityFindingSchema])
 async def get_security_findings_history(
@@ -701,6 +863,7 @@ async def get_security_findings_history(
             impact=f.impact,
             remediation=f.remediation,
             target=f.target,
+            confidence=f.confidence or "potential",
             status=f.status,
             created_at=f.created_at,
             acknowledged_at=f.acknowledged_at,
@@ -771,15 +934,21 @@ async def export_devices_report(
             headers={"Content-Disposition": "attachment; filename=netscope_devices.json"}
         )
 
-    # Generate CSV
+    # Generate CSV protected against Spreadsheet Formula Injection (CWE-1236)
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["ID", "IP Address", "MAC Address", "Vendor", "Hostname", "Custom Name", "Category", "Trusted", "Status", "Last Seen"])
     for d in devices:
         writer.writerow([
-            d.id, d.ip_address, d.mac_address or "N/A", d.vendor or "Unknown",
-            d.hostname or "N/A", d.custom_name or "N/A", d.category or "workstation",
-            "Yes" if d.is_trusted else "No", d.status,
+            d.id,
+            sanitize_csv_field(d.ip_address),
+            sanitize_csv_field(d.mac_address or "N/A"),
+            sanitize_csv_field(d.vendor or "Unknown"),
+            sanitize_csv_field(d.hostname or "N/A"),
+            sanitize_csv_field(d.custom_name or "N/A"),
+            sanitize_csv_field(d.category or "workstation"),
+            "Yes" if d.is_trusted else "No",
+            sanitize_csv_field(d.status),
             d.last_seen.isoformat() if d.last_seen else "N/A"
         ])
 
@@ -820,14 +989,22 @@ async def export_security_report(
             headers={"Content-Disposition": "attachment; filename=netscope_security_findings.json"}
         )
 
-    # Generate CSV
+    # Generate CSV protected against Spreadsheet Formula Injection (CWE-1236)
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["ID", "Rule ID", "Severity", "Title", "Category", "Target", "Status", "Evidence", "Remediation", "Timestamp"])
     for f in findings:
         writer.writerow([
-            f.id, f.rule_id, f.severity.upper(), f.title, f.category, f.target or "N/A",
-            f.status, f.evidence, f.remediation, f.created_at.isoformat() if f.created_at else "N/A"
+            f.id,
+            sanitize_csv_field(f.rule_id),
+            sanitize_csv_field(f.severity.upper()),
+            sanitize_csv_field(f.title),
+            sanitize_csv_field(f.category),
+            sanitize_csv_field(f.target or "N/A"),
+            sanitize_csv_field(f.status),
+            sanitize_csv_field(f.evidence),
+            sanitize_csv_field(f.remediation),
+            f.created_at.isoformat() if f.created_at else "N/A"
         ])
 
     return Response(
@@ -864,13 +1041,19 @@ async def export_history_report(
             headers={"Content-Disposition": "attachment; filename=netscope_scan_history.json"}
         )
 
+    # Generate CSV protected against Spreadsheet Formula Injection (CWE-1236)
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Scan ID", "Scan Type", "Target Range", "Status", "Targets Found", "Duration (s)", "Timestamp"])
     for s in scans:
         writer.writerow([
-            s.id, s.scan_type, s.target_range, s.status, s.found_targets,
-            s.duration_seconds, s.created_at.isoformat() if s.created_at else "N/A"
+            s.id,
+            sanitize_csv_field(s.scan_type),
+            sanitize_csv_field(s.target_range),
+            sanitize_csv_field(s.status),
+            s.found_targets,
+            s.duration_seconds,
+            s.created_at.isoformat() if s.created_at else "N/A"
         ])
 
     return Response(
@@ -899,14 +1082,11 @@ async def get_scan_history(db: AsyncSession = Depends(get_db)):
 
 @router.get("/settings")
 async def get_settings():
-    """Returns application configuration parameters."""
+    """Returns safe application configuration parameters for frontend consumption."""
     return {
         "project_name": settings.PROJECT_NAME,
         "version": settings.VERSION,
         "environment": settings.ENVIRONMENT,
         "telemetry_interval": settings.TELEMETRY_INTERVAL_SECONDS,
-        "max_concurrent_port_scans": settings.MAX_CONCURRENT_PORT_SCANS,
-        "authorized_networks": settings.AUTHORIZED_NETWORKS,
-        "authorized_targets": settings.AUTHORIZED_TARGETS,
-        "database_url": "sqlite+aiosqlite:///backend/data/netscope.db (WAL mode)"
+        "max_concurrent_port_scans": settings.MAX_CONCURRENT_PORT_SCANS
     }

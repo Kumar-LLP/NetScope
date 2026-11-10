@@ -2,17 +2,42 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 import sys
+import os
 from pathlib import Path
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
+# Isolate tests to a dedicated test database to protect production data
+TEST_DB_PATH = BASE_DIR / "data" / "test_isolated_netscope.db"
+TEST_DB_URL = f"sqlite+aiosqlite:///{TEST_DB_PATH.as_posix()}"
+
+test_engine = create_async_engine(TEST_DB_URL, echo=False, connect_args={"check_same_thread": False})
+TestSessionLocal = async_sessionmaker(bind=test_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+
+import app.core.database as db_module
+from app.core.database import Base, get_db
 from app.main import app
-from app.core.database import init_db
+
+# Patch database session provider and dependency override
+db_module.AsyncSessionLocal = TestSessionLocal
+
+async def override_get_db():
+    async with TestSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
+app.dependency_overrides[get_db] = override_get_db
 
 @pytest_asyncio.fixture(autouse=True)
-async def setup_database():
-    await init_db()
+async def setup_test_database():
+    TEST_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
 
 @pytest.mark.asyncio
 async def test_health_endpoint():
@@ -280,17 +305,17 @@ async def test_gateway_baseline_lifecycle():
         assert "gateway_ip" in baseline_data
         assert "status" in baseline_data
 
-        # 2. Confirm a baseline MAC
+        # 2. Confirm a baseline MAC (normalized to uppercase)
         confirm_res = await ac.post("/api/security/gateway-baseline/confirm", json={
             "baseline_mac": "00:aa:bb:cc:dd:ee"
         })
         assert confirm_res.status_code == 200
-        assert confirm_res.json()["baseline_mac"] == "00:aa:bb:cc:dd:ee"
+        assert confirm_res.json()["baseline_mac"] == "00:AA:BB:CC:DD:EE"
 
         # 3. Verify confirmed status in baseline endpoint
         verify_res = await ac.get("/api/security/gateway-baseline")
         assert verify_res.status_code == 200
-        assert verify_res.json()["baseline_mac"] == "00:aa:bb:cc:dd:ee"
+        assert verify_res.json()["baseline_mac"] == "00:AA:BB:CC:DD:EE"
 
         # 4. Reset baseline
         reset_res = await ac.post("/api/security/gateway-baseline/reset")
@@ -435,4 +460,132 @@ async def test_topology_read_only():
         assert "edges" in data
         assert isinstance(data["nodes"], list)
         assert isinstance(data["edges"], list)
+
+@pytest.mark.asyncio
+async def test_gateway_baseline_mac_validation():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Invalid MAC formats must return HTTP 422
+        bad_macs = ["invalid-mac", "00:11:22", "ZZ:ZZ:ZZ:ZZ:ZZ:ZZ", "12-34-56-78-90", "12:34:56:78:90:12:34"]
+        for bad_mac in bad_macs:
+            res = await ac.post("/api/security/gateway-baseline/confirm", json={"baseline_mac": bad_mac})
+            assert res.status_code == 422, f"Expected 422 for malformed MAC: {bad_mac}"
+            assert "Malformed MAC address" in res.json()["detail"]
+
+        # Valid format normalized to uppercase
+        res_valid = await ac.post("/api/security/gateway-baseline/confirm", json={"baseline_mac": "aa-bb-cc-11-22-33"})
+        assert res_valid.status_code == 200
+        assert res_valid.json()["baseline_mac"] == "AA:BB:CC:11:22:33"
+
+@pytest.mark.asyncio
+async def test_csv_formula_injection_sanitization():
+    import uuid
+    from app.core.database import AsyncSessionLocal
+    from app.models.entities import NetworkDeviceModel
+
+    random_hex = uuid.uuid4().hex[:6]
+    test_mac = f"02:00:EE:{random_hex[:2]}:{random_hex[2:4]}:{random_hex[4:6]}"
+    test_ip = f"192.168.1.{int(random_hex[:2], 16) % 200 + 10}"
+
+    # Seed device with potentially malicious spreadsheet formulas
+    async with AsyncSessionLocal() as session:
+        evil_dev = NetworkDeviceModel(
+            ip_address=test_ip,
+            mac_address=test_mac,
+            vendor="=cmd|' /C calc'!A0",
+            hostname="@SUM(1,2)",
+            custom_name="-DangerousFormula",
+            notes="+AnotherFormula",
+            is_gateway=False,
+            is_local_host=False,
+            status="online"
+        )
+        session.add(evil_dev)
+        await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.get("/api/reports/devices/export?format=csv")
+        assert res.status_code == 200
+        csv_text = res.text
+
+        # Ensure formula prefix characters are sanitized with single apostrophe
+        assert "'=cmd|' /C calc'!A0" in csv_text
+        assert "'@SUM(1,2)" in csv_text
+        assert "'-DangerousFormula" in csv_text
+
+@pytest.mark.asyncio
+async def test_dns_rebinding_rejected(monkeypatch):
+    import socket
+
+    # Simulate DNS rebinding response: resolves to both loopback and an unauthorized public WAN IP
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.post("/api/diagnostics/ports", json={
+            "target": "localhost",
+            "ports": [80],
+            "authorized": True
+        })
+        assert res.status_code == 403
+        assert "dns rebinding" in res.json()["detail"].lower()
+
+@pytest.mark.asyncio
+async def test_settings_endpoint_no_information_disclosure():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.get("/api/settings")
+        assert res.status_code == 200
+        data = res.json()
+        # Internal configuration secrets must NOT be disclosed
+        assert "authorized_networks" not in data
+        assert "authorized_targets" not in data
+        assert "database_url" not in data
+        assert "cors_origins" not in data
+        # Safe public operational metadata must be present
+        assert "project_name" in data
+        assert "version" in data
+        assert "environment" in data
+        assert "telemetry_interval" in data
+        assert "max_concurrent_port_scans" in data
+
+@pytest.mark.asyncio
+async def test_interface_selection_validation():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Non-existent adapter returns 404
+        res_404 = await ac.post("/api/network/interfaces/select", json={"interface_name": "NonExistentAdapter_999"})
+        assert res_404.status_code == 404
+        assert "not found on host" in res_404.json()["detail"]
+
+        # Empty interface name returns 400
+        res_400 = await ac.post("/api/network/interfaces/select", json={"interface_name": "   "})
+        assert res_400.status_code == 400
+        assert "cannot be empty" in res_400.json()["detail"]
+
+@pytest.mark.asyncio
+async def test_ip_info_binary_host_representation():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.post("/api/diagnostics/ip-info", json={"ip_or_cidr": "192.168.1.50/24"})
+        assert res.status_code == 200
+        data = res.json()
+        # Binary representation must accurately represent host IP .50 (00110010), not network .0 (00000000)
+        assert data["binary_representation"] == "11000000.10101000.00000001.00110010"
+        assert data["network_address"] == "192.168.1.0"
+        assert data["broadcast_address"] == "192.168.1.255"
+
+@pytest.mark.asyncio
+async def test_security_audit_run_endpoint():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.post("/api/security/audit/run")
+        assert res.status_code == 200
+        findings = res.json()
+        assert isinstance(findings, list)
+        for f in findings:
+            assert "rule_id" in f
+            assert "confidence" in f
+            assert f["confidence"] in ("confirmed", "potential", "informational")
+
 

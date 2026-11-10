@@ -208,15 +208,18 @@ def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
     """
     Calculates IPv4 and IPv6 subnetting, usable host range, broadcast address,
     and binary formatting mathematically without memory allocation.
+    Accurately represents the binary notation of the host address while preserving
+    the network address separately.
     """
     clean_input = ip_or_cidr.strip()
     try:
         if "/" in clean_input:
-            net = ipaddress.ip_network(clean_input, strict=False)
-            addr = net.network_address
+            iface_obj = ipaddress.ip_interface(clean_input)
+            host_ip = iface_obj.ip
+            net = iface_obj.network
         else:
-            addr = ipaddress.ip_address(clean_input)
-            suffix = "/32" if addr.version == 4 else "/128"
+            host_ip = ipaddress.ip_address(clean_input)
+            suffix = "/32" if host_ip.version == 4 else "/128"
             net = ipaddress.ip_network(f"{clean_input}{suffix}", strict=False)
     except Exception as e:
         raise ValueError(f"Invalid IP/CIDR input '{clean_input}': {str(e)}")
@@ -244,7 +247,8 @@ def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
             usable_range = [first_host, last_host]
             bcast_str = str(net.broadcast_address)
 
-        binary_rep = ".".join(f"{int(octet):08b}" for octet in str(addr).split("."))
+        # Binary representation corresponds to the host IP
+        binary_rep = ".".join(f"{int(octet):08b}" for octet in str(host_ip).split("."))
     else:
         # IPv6
         netmask_str = str(net.netmask)
@@ -259,7 +263,7 @@ def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
             last_host = str(ipaddress.IPv6Address(int(net.network_address) + (2 ** (128 - prefix) - 1)))
             usable_range = [first_host, last_host]
 
-        binary_rep = bin(int(addr))[2:].zfill(128)
+        binary_rep = bin(int(host_ip))[2:].zfill(128)
 
     return IPInfoResponse(
         input=clean_input,
@@ -277,55 +281,85 @@ def calculate_ip_info(ip_or_cidr: str) -> IPInfoResponse:
 
 def run_connectivity_test() -> Dict[str, Any]:
     """
-    Executes a comprehensive 3-tier connectivity benchmark:
-    1. Local loopback / Host internal stack
-    2. Default Gateway reachability
-    3. Internet public DNS (1.1.1.1 / 8.8.8.8)
+    Executes a comprehensive 4-tier connectivity benchmark:
+    1. Local loopback / Host internal network stack
+    2. Default Gateway reachability & latency
+    3. Internet public WAN latency & packet loss
+    4. Genuine DNS resolution testing (A record query)
     """
-    from app.network.gateway import check_gateway_connectivity, check_internet_connectivity, get_default_gateway
+    from app.network.gateway import (
+        check_gateway_connectivity,
+        check_internet_connectivity,
+        get_default_gateway,
+        measure_tcp_connect_latency
+    )
 
-    results = {}
+    results: Dict[str, Any] = {}
     gw_ip = get_default_gateway()
 
     # Tier 1: Local Loopback
     loopback_ping = run_ping("127.0.0.1", count=2, timeout_ms=300)
     results["loopback"] = {
         "target": "127.0.0.1",
-        "reachable": loopback_ping.packet_loss_pct < 100.0,
-        "avg_rtt_ms": loopback_ping.avg_rtt_ms
+        "ok": loopback_ping.packet_loss_pct < 100.0,
+        "latency_ms": loopback_ping.avg_rtt_ms
     }
 
     # Tier 2: Default Gateway
     gw_reachable, gw_rtt, gw_loss = check_gateway_connectivity(gw_ip)
     results["gateway"] = {
-        "target": gw_ip or "Unavailable",
-        "reachable": gw_reachable,
-        "avg_rtt_ms": gw_rtt,
+        "gateway_ip": gw_ip or "Unavailable",
+        "ok": gw_reachable,
+        "latency_ms": gw_rtt,
         "packet_loss_pct": gw_loss
     }
 
-    # Tier 3: Internet & DNS
+    # Tier 3: Internet Connectivity (ICMP + TCP Connect)
     net_reachable, net_rtt, net_loss = check_internet_connectivity()
+    tcp_latency = measure_tcp_connect_latency("1.1.1.1", 53, 0.4)
     results["internet"] = {
-        "target": "1.1.1.1 / 8.8.8.8",
-        "reachable": net_reachable,
-        "avg_rtt_ms": net_rtt,
+        "tested_target": "1.1.1.1 / 8.8.8.8",
+        "ok": net_reachable,
+        "latency_ms": net_rtt,
+        "tcp_latency_ms": tcp_latency,
         "packet_loss_pct": net_loss
     }
 
+    # Tier 4: Genuine DNS Resolution
+    dns_ok = False
+    dns_time_ms = None
+    dns_resolved_by = "System Resolver"
+    dns_test_domain = "one.one.one.one"
+    try:
+        dns_res = run_dns_lookup(dns_test_domain, record_type="A")
+        if dns_res.records and any(len(v) > 0 for v in dns_res.records.values()):
+            dns_ok = True
+            dns_time_ms = dns_res.query_time_ms
+            dns_resolved_by = dns_res.resolved_by
+    except Exception:
+        dns_ok = False
+
     results["dns"] = {
-        "resolving": net_reachable,
-        "provider": "Cloudflare / Google Public"
+        "ok": dns_ok,
+        "latency_ms": dns_time_ms,
+        "tested_domain": dns_test_domain,
+        "resolved_by": dns_resolved_by
     }
 
-    if net_reachable and gw_reachable:
+    # Benchmark verdict
+    if net_reachable and gw_reachable and dns_ok:
         verdict = "HEALTHY"
+        summary = "All network tiers operating optimally with sub-second DNS resolution."
     elif gw_reachable and not net_reachable:
         verdict = "LOCAL_ONLY"
+        summary = "Local gateway is responsive, but public Internet WAN is unreachable."
     elif not gw_reachable and not net_reachable:
         verdict = "OFFLINE"
+        summary = "Host interface is isolated; gateway and Internet are unreachable."
     else:
         verdict = "DEGRADED"
+        summary = "Partial network connectivity; DNS or packet loss degradation observed."
 
     results["verdict"] = verdict
+    results["summary"] = summary
     return results

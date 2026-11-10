@@ -66,8 +66,11 @@ class DeviceUpdateRequest(BaseModel):
 
 class DeviceDiscoverResponse(BaseModel):
     scan_id: str
+    total_targets: int = 0
+    total_scanned: int = 0
     total_discovered: int
     duration_seconds: float
+    status: str = "completed"
     devices: List[DeviceSchema]
 
 class TopologyNodeData(BaseModel):
@@ -210,6 +213,7 @@ class SecurityFindingSchema(BaseModel):
     impact: str
     remediation: str
     target: Optional[str] = None
+    confidence: str = "potential" # 'confirmed', 'potential', 'informational'
     status: str = "active" # 'active', 'acknowledged', 'resolved'
     created_at: Optional[datetime] = None
     acknowledged_at: Optional[datetime] = None
