@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useTelemetry } from '../hooks/useTelemetry';
 import { api } from '../services/api';
-import { NetworkInterface, PacketCaptureStatus } from '../types/network';
+import { NetworkInterface, PacketCaptureStatus, PacketCaptureSession } from '../types/network';
 import { StatCard } from '../components/common/StatCard';
 import { Badge } from '../components/common/Badge';
 import {
@@ -19,7 +19,10 @@ import {
   Percent,
   Play,
   Square,
-  ShieldAlert
+  ShieldAlert,
+  History,
+  CheckCircle2,
+  Clock
 } from 'lucide-react';
 import {
   AreaChart,
@@ -39,6 +42,7 @@ export const TrafficAnalyticsPage: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
   const [switching, setSwitching] = useState<boolean>(false);
   const [packetStatus, setPacketStatus] = useState<PacketCaptureStatus | null>(null);
+  const [sessions, setSessions] = useState<PacketCaptureSession[]>([]);
   const [captureLoading, setCaptureLoading] = useState<boolean>(false);
 
   const downloadBlob = (blob: Blob, filename: string) => {
@@ -68,10 +72,20 @@ export const TrafficAnalyticsPage: React.FC = () => {
     }
   };
 
+  const fetchSessions = async () => {
+    try {
+      const sess = await api.getPacketSessions(20);
+      setSessions(sess);
+    } catch (e) {
+      // ignore
+    }
+  };
+
   const fetchPacketStatus = async () => {
     try {
       const status = await api.getPacketCaptureStatus();
       setPacketStatus(status);
+      await fetchSessions();
     } catch (e) {
       // ignore
     }
@@ -79,15 +93,18 @@ export const TrafficAnalyticsPage: React.FC = () => {
 
   useEffect(() => {
     fetchPacketStatus();
+    fetchSessions();
   }, []);
+
+  const isCapturing = Boolean(packetStatus?.is_capturing || packetStatus?.is_running);
 
   useEffect(() => {
     let interval: any;
-    if (packetStatus?.is_running) {
+    if (isCapturing) {
       interval = setInterval(fetchPacketStatus, 1000);
     }
     return () => clearInterval(interval);
-  }, [packetStatus?.is_running]);
+  }, [isCapturing]);
 
   const handleStartCapture = async () => {
     try {
@@ -106,6 +123,7 @@ export const TrafficAnalyticsPage: React.FC = () => {
       setCaptureLoading(true);
       await api.stopPacketCapture();
       await fetchPacketStatus();
+      await fetchSessions();
     } catch (err: any) {
       alert(`Stop failed: ${err.message || err}`);
     } finally {
@@ -329,7 +347,7 @@ export const TrafficAnalyticsPage: React.FC = () => {
             <div className="flex items-center gap-2">
               <Layers className="w-4 h-4 text-cyber-cyan" />
               <h3 className="text-sm font-semibold text-cyber-text">Real-Time Packet & Protocol Inspection</h3>
-              {packetStatus?.is_running && (
+              {isCapturing && (
                 <span className="flex items-center gap-1 text-[10px] font-mono text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2 py-0.5 rounded">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
                   CAPTURING
@@ -337,12 +355,12 @@ export const TrafficAnalyticsPage: React.FC = () => {
               )}
             </div>
             <p className="text-xs text-cyber-subtext mt-0.5">
-              Opt-in non-invasive network layer telemetry • Zero payload inspection • Windows Raw Socket / Scapy
+              Opt-in non-invasive network layer telemetry • Zero payload inspection • Scapy / Npcap Raw Socket
             </p>
           </div>
 
           <div className="flex items-center gap-2">
-            {!packetStatus?.is_running ? (
+            {!isCapturing ? (
               <button
                 onClick={handleStartCapture}
                 disabled={captureLoading}
@@ -371,18 +389,38 @@ export const TrafficAnalyticsPage: React.FC = () => {
           </div>
         </div>
 
-        {packetStatus?.error && (
+        {/* Driver Capability / System Notice */}
+        {packetStatus?.note && (
+          <div className={`p-3 rounded-lg border text-xs flex items-center gap-2.5 font-mono ${
+            packetStatus.supported === false
+              ? 'bg-amber-950/20 border-amber-800/40 text-amber-300'
+              : 'bg-cyan-950/20 border-cyan-800/40 text-cyan-300'
+          }`}>
+            <ShieldAlert className="w-4 h-4 shrink-0" />
+            <div>
+              <span className="font-bold block uppercase text-[10px]">
+                {packetStatus.supported === false ? 'Packet Capture Driver Notice' : 'Capture Environment'}
+              </span>
+              <span>{packetStatus.note}</span>
+            </div>
+          </div>
+        )}
+
+        {(packetStatus?.error_message || packetStatus?.error) && (
           <div className="p-3 rounded-lg bg-rose-950/20 border border-rose-800/40 text-xs text-rose-300 flex items-center gap-2">
             <ShieldAlert className="w-4 h-4 shrink-0" />
-            <span>{packetStatus.error}</span>
+            <span>{packetStatus.error_message || packetStatus.error}</span>
           </div>
         )}
 
         {/* Protocol Distribution Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
           {['TCP', 'UDP', 'ICMP', 'DNS', 'OTHER'].map((proto) => {
-            const count = packetStatus?.protocol_distribution?.[proto] || 0;
-            const total = packetStatus?.total_captured || 0;
+            const count =
+              (packetStatus?.stats as any)?.[`${proto.toLowerCase()}_packets`] ??
+              packetStatus?.protocol_distribution?.[proto] ??
+              0;
+            const total = packetStatus?.stats?.total_packets ?? packetStatus?.total_captured ?? 0;
             const pct = total > 0 ? ((count / total) * 100).toFixed(1) : '0';
             return (
               <div key={proto} className="bg-cyber-surface border border-cyber-border/70 rounded-lg p-3 text-center">
@@ -394,7 +432,16 @@ export const TrafficAnalyticsPage: React.FC = () => {
           })}
         </div>
 
-        {/* Recent Packets Stream */}
+        {/* Capture Telemetry Footer */}
+        {packetStatus?.stats && (
+          <div className="flex items-center justify-between text-xs font-mono text-cyber-subtext pt-2 border-t border-cyber-border/40">
+            <span>Total Captured: <strong className="text-cyber-text">{packetStatus.stats.total_packets}</strong> packets</span>
+            <span>Bytes: <strong className="text-cyber-text">{(packetStatus.stats.total_bytes / 1024).toFixed(1)} KB</strong></span>
+            <span>Duration: <strong className="text-cyber-cyan">{packetStatus.stats.duration_seconds.toFixed(1)}s</strong></span>
+          </div>
+        )}
+
+        {/* Recent Packets Stream (if available) */}
         {packetStatus?.recent_packets && packetStatus.recent_packets.length > 0 && (
           <div className="space-y-2 mt-4">
             <div className="text-[11px] font-mono text-cyber-subtext uppercase tracking-wider flex items-center justify-between">
@@ -421,6 +468,73 @@ export const TrafficAnalyticsPage: React.FC = () => {
             </div>
           </div>
         )}
+
+        {/* Historical Capture Sessions Table */}
+        <div className="mt-6 pt-4 border-t border-cyber-border space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <History className="w-4 h-4 text-cyber-cyan" />
+              <h4 className="text-xs font-semibold text-cyber-text uppercase font-mono tracking-wider">
+                Capture Session History ({sessions.length})
+              </h4>
+            </div>
+            <button
+              onClick={fetchSessions}
+              className="text-[11px] font-mono text-cyber-subtext hover:text-cyber-cyan flex items-center gap-1"
+            >
+              <RefreshCw className="w-3 h-3" /> Refresh Sessions
+            </button>
+          </div>
+
+          {sessions.length === 0 ? (
+            <div className="text-center py-4 text-xs font-mono text-cyber-subtext bg-black/30 rounded border border-cyber-border/40">
+              No historical packet capture sessions recorded in database.
+            </div>
+          ) : (
+            <div className="overflow-x-auto border border-cyber-border rounded-lg">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-slate-900/80 text-cyber-subtext uppercase text-[10px] border-b border-cyber-border">
+                  <tr>
+                    <th className="py-2.5 px-3">Session ID</th>
+                    <th className="py-2.5 px-3">Interface</th>
+                    <th className="py-2.5 px-3">Status</th>
+                    <th className="py-2.5 px-3">Packets</th>
+                    <th className="py-2.5 px-3">Protocols (TCP/UDP/ICMP/DNS)</th>
+                    <th className="py-2.5 px-3">Duration</th>
+                    <th className="py-2.5 px-3">Started At</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-cyber-border/40">
+                  {sessions.map((s) => (
+                    <tr key={s.id} className="hover:bg-cyber-surface/60">
+                      <td className="py-2.5 px-3 text-cyber-cyan font-bold">{s.id}</td>
+                      <td className="py-2.5 px-3 text-cyber-text">{s.interface_name}</td>
+                      <td className="py-2.5 px-3">
+                        <span className={`text-[10px] px-2 py-0.5 rounded ${
+                          s.status === 'completed'
+                            ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-800/40'
+                            : s.status === 'capturing'
+                            ? 'bg-cyan-950/40 text-cyan-400 border border-cyan-800/40 animate-pulse'
+                            : 'bg-rose-950/40 text-rose-400 border border-rose-800/40'
+                        }`}>
+                          {s.status.toUpperCase()}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-cyber-text font-bold">{s.total_packets}</td>
+                      <td className="py-2.5 px-3 text-cyber-subtext text-[11px]">
+                        {s.tcp_packets} / {s.udp_packets} / {s.icmp_packets} / {s.dns_packets}
+                      </td>
+                      <td className="py-2.5 px-3 text-cyber-subtext">{s.duration_seconds.toFixed(1)}s</td>
+                      <td className="py-2.5 px-3 text-slate-500 text-[11px]">
+                        {new Date(s.started_at).toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -157,24 +157,85 @@ Confirms the gateway baseline. Requires supplied MAC to match detected gateway.
 ### `POST /api/security/gateway-baseline/reset`
 Resets the confirmed gateway baseline.
 
+### `POST /api/security/anomalies/evaluate`
+Triggers active evaluation of telemetry and device observations against anomaly detection rules. Returns detected anomalies.
+
 ### `GET /api/security/anomalies`
-Returns detected network anomalies (throughput spikes, gateway swaps, packet loss surges).
+Returns active, unresolved network anomalies (`status` = `active` or `investigating`).
+
+### `GET /api/security/anomalies/history?limit=100`
+Returns historical network anomalies including acknowledged and resolved events.
+
+### `POST /api/security/anomalies/{anomaly_id}/acknowledge`
+Marks an active anomaly as acknowledged by operator, recording timestamp and optional notes:
+```json
+{ "notes": "Investigating spike on adapter eth0" }
+```
+
+### `POST /api/security/anomalies/{anomaly_id}/resolve`
+Marks an anomaly as resolved:
+```json
+{ "notes": "Confirmed large scheduled backup finished" }
+```
 
 ### `POST /api/security/anomalies/tune`
-Updates anomaly detection thresholds.
+Updates and persists anomaly detection thresholds across application restarts:
+```
+POST /api/security/anomalies/tune?traffic_spike_kbps=50000&packet_loss_pct=30&latency_surge_ms=250
+```
+
+---
+
+## 🧠 Central Network Intelligence Correlation Engine
+
+### `POST /api/intelligence/evaluate`
+Consumes multi-domain evidence (ARP discovery, traffic throughput, packet analysis, port diagnostics, DNS responses, and historical observations) to generate explainable, correlated intelligence events.
+
+### `GET /api/intelligence/events`
+Returns correlated intelligence events with optional filtering:
+- Query parameters: `category`, `severity`, `status`, `limit` (1-200)
+
+### `POST /api/intelligence/events/{event_id}/status`
+Updates investigation status for a correlated intelligence event (`unreviewed`, `investigating`, `acknowledged`, `resolved`, `dismissed`):
+```json
+{ "status": "resolved" }
+```
 
 ---
 
 ## 📦 Packet Analysis & Learning Mode
 
 ### `GET /api/packets/status`
-Returns packet capture engine status, protocol breakdown, and recent header flows.
+Returns live packet capture status, real capability check (`supported: bool`), protocol breakdown, and capture stats:
+```json
+{
+  "is_capturing": false,
+  "supported": true,
+  "session_id": "pktsess_12345",
+  "interface_name": "Ethernet",
+  "stats": {
+    "total_packets": 500,
+    "tcp_packets": 320,
+    "udp_packets": 140,
+    "icmp_packets": 10,
+    "dns_packets": 25,
+    "other_packets": 5,
+    "total_bytes": 145200,
+    "duration_seconds": 12.4
+  },
+  "note": null,
+  "error_message": null
+}
+```
+
+### `GET /api/packets/sessions?limit=20`
+Returns historical packet capture sessions persisted in the database.
 
 ### `POST /api/packets/start?max_packets=500`
-Starts opt-in non-invasive packet capture.
+Starts an opt-in non-invasive packet capture session on the specified or default adapter.
 
 ### `POST /api/packets/stop`
-Stops running packet capture.
+Gracefully stops active packet capture and finalizes session statistics.
 
 ### `GET /api/learning/topics`
 Returns educational networking topics linked to live telemetry keys.
@@ -182,6 +243,9 @@ Returns educational networking topics linked to live telemetry keys.
 ---
 
 ## 📁 Data Export & Maintenance
+
+### `GET /api/devices/paginated?page=1&page_size=25&status=online&search=cisco`
+Returns paginated device inventory with search filtering and total count metadata.
 
 ### `GET /api/reports/devices/export?format=csv`
 Exports device inventory as CSV or JSON with formula injection protection.
@@ -192,8 +256,15 @@ Exports security findings as CSV or JSON.
 ### `GET /api/reports/history/export?format=csv`
 Exports historical telemetry metrics as CSV or JSON.
 
-### `POST /api/history/cleanup?retention_days=30`
-Prunes telemetry metrics and diagnostics older than the retention threshold.
+### `POST /api/history/cleanup`
+Granular data retention policy enforcer supporting tiered retention periods:
+```
+POST /api/history/cleanup?metrics_retention_days=7&diagnostics_retention_days=14&scans_retention_days=30&security_retention_days=90
+```
+- `metrics_retention_days`: Retention period for high-frequency time-series bandwidth metrics (default: 7 days).
+- `diagnostics_retention_days`: Retention period for ping/DNS diagnostic results (default: 14 days).
+- `scans_retention_days`: Retention period for discovery scans and device observations (default: 30 days).
+- `security_retention_days`: Retention period for resolved security findings and anomalies (default: 90 days).
 
 ---
 

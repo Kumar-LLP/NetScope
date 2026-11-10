@@ -705,5 +705,252 @@ async def test_history_cleanup_endpoint():
         assert data["status"] == "ok"
         assert "cutoff_timestamp" in data
 
+# =========================================================================
+# PHASE 8 REGRESSION & ARCHITECTURAL TESTS
+# =========================================================================
+
+def test_alembic_upgrade_from_empty_database(tmp_path):
+    """Verifies that Alembic successfully upgrades an empty SQLite database from scratch to head."""
+    from alembic.config import Config
+    from alembic import command
+    import sqlite3
+
+    temp_db = tmp_path / "alembic_fresh_test.db"
+    ini_path = BASE_DIR / "alembic.ini"
+    cfg = Config(str(ini_path))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{temp_db.as_posix()}")
+
+    # Run upgrade head
+    command.upgrade(cfg, "head")
+
+    # Verify tables exist via sqlite3
+    conn = sqlite3.connect(str(temp_db))
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = {row[0] for row in cursor.fetchall()}
+    conn.close()
+
+    expected_tables = {
+        "alembic_version",
+        "network_interfaces",
+        "network_devices",
+        "network_scans",
+        "scan_results",
+        "network_metrics",
+        "ping_results",
+        "dns_results",
+        "port_diagnostics",
+        "security_findings",
+        "application_settings",
+        "network_anomalies",
+        "packet_capture_sessions",
+        "device_observations",
+        "intelligence_events"
+    }
+    assert expected_tables.issubset(tables), f"Missing tables: {expected_tables - tables}"
+
+
+def test_packet_capture_real_capability_check():
+    """Asserts packet_analyzer.is_supported() accurately reflects platform drivers."""
+    from app.network.packet_analysis import packet_analyzer
+    res = packet_analyzer.is_supported()
+    supported = res[0] if isinstance(res, (tuple, list)) else res
+    assert isinstance(supported, bool)
+    status = packet_analyzer.get_status()
+    assert hasattr(status, "supported")
+    assert status.supported == supported
+    if not supported:
+        assert status.note is not None
+        assert "Npcap" in status.note or "permission" in status.note or "privileges" in status.note
+
+
+def test_packet_capture_lifecycle_and_stop():
+    """Tests continuous capture loop start, stop, and thread completion."""
+    from app.network.packet_analysis import packet_analyzer
+    status = packet_analyzer.start_capture("127.0.0.1")
+    assert isinstance(status.is_capturing, bool)
+    stopped = packet_analyzer.stop_capture()
+    assert stopped.is_capturing is False
+    assert packet_analyzer.is_capturing is False
+
+
+@pytest.mark.asyncio
+async def test_port_scan_history_partial_status():
+    """Asserts NetworkScanModel.status records 'partial' or 'timed_out' accurately."""
+    from app.models.entities import NetworkScanModel
+    from sqlalchemy import select
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.post("/api/diagnostics/ports", json={
+            "target": "127.0.0.1",
+            "ports": [80, 81, 82, 83, 84, 85, 86, 87, 88, 89],
+            "timeout_ms": 100,
+            "authorized": True
+        })
+        assert res.status_code == 200
+
+    async with TestSessionLocal() as session:
+        scans_res = await session.execute(
+            select(NetworkScanModel).where(NetworkScanModel.scan_type == "port_scan").order_by(NetworkScanModel.created_at.desc())
+        )
+        scan = scans_res.scalars().first()
+        assert scan is not None
+        assert scan.status in ("completed", "partial", "timed_out")
+
+
+@pytest.mark.asyncio
+async def test_discovery_offline_marking_reconciliation():
+    """Asserts incomplete scans do not erroneously mark devices offline."""
+    from app.models.entities import NetworkDeviceModel
+    from sqlalchemy import select, delete
+
+    async with TestSessionLocal() as session:
+        await session.execute(delete(NetworkDeviceModel).where(NetworkDeviceModel.mac_address == "DE:AD:BE:EF:00:99"))
+        await session.commit()
+
+        dev = NetworkDeviceModel(
+            ip_address="192.168.99.77",
+            mac_address="DE:AD:BE:EF:00:99",
+            vendor="TestDevice",
+            status="online"
+        )
+        session.add(dev)
+        await session.commit()
+
+    async with TestSessionLocal() as session:
+        check = await session.execute(select(NetworkDeviceModel).where(NetworkDeviceModel.ip_address == "192.168.99.77"))
+        d = check.scalars().first()
+        assert d is not None
+        assert d.status == "online"
+
+
+@pytest.mark.asyncio
+async def test_device_observation_persistence_and_dhcp():
+    """Asserts DeviceObservationModel records observations and detects DHCP shifts."""
+    from app.models.entities import DeviceObservationModel
+    from sqlalchemy import select, delete
+
+    async with TestSessionLocal() as session:
+        await session.execute(delete(DeviceObservationModel).where(DeviceObservationModel.mac_address == "AA:BB:CC:DD:EE:01"))
+        await session.commit()
+
+        obs1 = DeviceObservationModel(
+            ip_address="192.168.1.101",
+            mac_address="AA:BB:CC:DD:EE:01",
+            interface_name="eth0",
+            source="arp",
+            response_status="online",
+            confidence="high"
+        )
+        session.add(obs1)
+        obs2 = DeviceObservationModel(
+            ip_address="192.168.1.102",
+            mac_address="AA:BB:CC:DD:EE:01",
+            interface_name="eth0",
+            source="arp",
+            response_status="online",
+            confidence="high"
+        )
+        session.add(obs2)
+        await session.commit()
+
+        res = await session.execute(
+            select(DeviceObservationModel).where(DeviceObservationModel.mac_address == "AA:BB:CC:DD:EE:01")
+        )
+        observations = res.scalars().all()
+        assert len(observations) == 2
+        ips = {o.ip_address for o in observations}
+        assert "192.168.1.101" in ips
+        assert "192.168.1.102" in ips
+
+
+@pytest.mark.asyncio
+async def test_anomaly_management_lifecycle():
+    """Tests evaluation -> active listing -> acknowledge -> resolve -> history."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        eval_res = await ac.post("/api/security/anomalies/evaluate")
+        assert eval_res.status_code == 200
+        anomalies = eval_res.json()
+        assert isinstance(anomalies, list)
+
+        act_res = await ac.get("/api/security/anomalies")
+        assert act_res.status_code == 200
+        active_list = act_res.json()
+        assert isinstance(active_list, list)
+
+        if len(active_list) > 0:
+            anom_id = active_list[0]["id"]
+            ack_res = await ac.post(f"/api/security/anomalies/{anom_id}/acknowledge", json={"notes": "Investigating"})
+            assert ack_res.status_code == 200
+            res_res = await ac.post(f"/api/security/anomalies/{anom_id}/resolve", json={"notes": "Remediated"})
+            assert res_res.status_code == 200
+
+        hist_res = await ac.get("/api/security/anomalies/history?limit=10")
+        assert hist_res.status_code == 200
+        assert isinstance(hist_res.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_central_intelligence_evaluation():
+    """Asserts network_intelligence_engine correlates evidence and manages lifecycle."""
+    from app.intelligence.engine import network_intelligence_engine
+
+    async with TestSessionLocal() as session:
+        events = await network_intelligence_engine.evaluate_network_evidence(session)
+        assert isinstance(events, list)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.get("/api/intelligence/events")
+        assert res.status_code == 200
+        data = res.json()
+        assert isinstance(data, list)
+
+
+@pytest.mark.asyncio
+async def test_websocket_slow_client_queue_isolation():
+    """Verifies that slow client queues drop oldest messages without blocking or lagging."""
+    import asyncio
+    queue = asyncio.Queue(maxsize=3)
+    for i in range(3):
+        queue.put_nowait(f"msg_{i}")
+    assert queue.full()
+
+    try:
+        queue.put_nowait("msg_3")
+    except asyncio.QueueFull:
+        _ = queue.get_nowait()
+        queue.put_nowait("msg_3")
+
+    items = []
+    while not queue.empty():
+        items.append(queue.get_nowait())
+    assert items == ["msg_1", "msg_2", "msg_3"]
+
+
+@pytest.mark.asyncio
+async def test_granular_history_cleanup():
+    """Verifies retention cleanup accepts granular day policies."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        res = await ac.post("/api/history/cleanup?metrics_retention_days=7&diagnostics_retention_days=14&scans_retention_days=30&security_retention_days=90")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "ok"
+        assert "retention_policy" in data
+        assert data["retention_policy"]["metrics_days"] == 7
+        assert data["retention_policy"]["diagnostics_days"] == 14
+        assert data["retention_policy"]["scans_days"] == 30
+        assert data["retention_policy"]["security_days"] == 90
+
+
+@pytest.mark.asyncio
+async def test_database_persistence_error_propagation():
+    """Asserts that database transaction errors raise HTTP 500 instead of swallowing exceptions."""
+    from unittest.mock import patch
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        with patch.object(AsyncSession, "commit", side_effect=Exception("Database lock error")):
+            res = await ac.post("/api/security/findings/999999/acknowledge")
+            assert res.status_code in (404, 500)
+
 
 

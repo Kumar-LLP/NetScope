@@ -12,7 +12,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, Body
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, desc
 
 from app.core.config import settings
 from app.core.database import get_db
@@ -41,7 +41,9 @@ from app.schemas.network import (
     PaginatedDevicesResponse,
     PacketCaptureStatusResponse,
     AnomalySchema,
-    LearningTopic
+    LearningTopic,
+    IntelligenceEventSchema,
+    DeviceObservationSchema
 )
 from app.models.entities import (
     NetworkDeviceModel,
@@ -54,7 +56,9 @@ from app.models.entities import (
     SecurityFindingModel,
     ApplicationSettingsModel,
     PacketCaptureSessionModel,
-    NetworkAnomalyModel
+    NetworkAnomalyModel,
+    DeviceObservationModel,
+    IntelligenceEventModel
 )
 from app.network.interfaces import get_network_interfaces, get_active_interface_ip, calculate_cidr
 from app.network.gateway import (
@@ -75,6 +79,7 @@ from app.security.auditor import security_auditor
 from app.network.packet_analysis import packet_analyzer
 from app.security.anomaly import anomaly_detector
 from app.network.learning import get_learning_topics_with_context
+from app.intelligence.engine import network_intelligence_engine
 
 router = APIRouter()
 
@@ -162,10 +167,10 @@ async def get_overview():
     dns_list = get_dns_servers()
     pub_ip = await get_public_ip()
 
-    # Genuine connectivity & latency checks
-    is_net_online, icmp_latency, packet_loss = check_internet_connectivity()
-    is_gw_online, _, _ = check_gateway_connectivity(gw)
-    tcp_latency = measure_tcp_connect_latency("1.1.1.1", 53, 0.3)
+    # Genuine connectivity & latency checks offloaded to thread pool to prevent blocking async event loop
+    is_net_online, icmp_latency, packet_loss = await asyncio.to_thread(check_internet_connectivity)
+    is_gw_online, _, _ = await asyncio.to_thread(check_gateway_connectivity, gw)
+    tcp_latency = await asyncio.to_thread(measure_tcp_connect_latency, "1.1.1.1", 53, 0.3)
 
     health = calculate_health_score(icmp_latency, packet_loss)
 
@@ -258,7 +263,8 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
         discovered_ips = {dev.ip for dev in result.devices}
 
         # Subnet-aware offline marking:
-        # If target subnet was specified or discovered, mark existing stored devices in that subnet not seen in this sweep as offline
+        # Reconcile offline devices ONLY if the discovery scan completed fully across the target subnet.
+        # Partial, timed-out, stopped, or failed sweeps must NEVER incorrectly mark devices offline.
         scanned_net = None
         target_subnet_str = payload.cidr
         if target_subnet_str:
@@ -267,18 +273,20 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
             except Exception:
                 pass
 
-        all_stored_res = await db.execute(select(NetworkDeviceModel))
-        all_stored = all_stored_res.scalars().all()
-        for stored in all_stored:
-            if stored.ip_address not in discovered_ips:
-                try:
-                    dev_ip_obj = ipaddress.ip_address(stored.ip_address)
-                    if scanned_net and dev_ip_obj in scanned_net:
-                        stored.status = "offline"
-                except Exception:
-                    pass
+        if result.status == "completed" and scanned_net:
+            all_stored_res = await db.execute(select(NetworkDeviceModel))
+            all_stored = all_stored_res.scalars().all()
+            for stored in all_stored:
+                if stored.ip_address not in discovered_ips:
+                    try:
+                        dev_ip_obj = ipaddress.ip_address(stored.ip_address)
+                        if dev_ip_obj in scanned_net:
+                            stored.status = "offline"
+                    except Exception:
+                        pass
 
-        # Upsert discovered devices and record ScanResultModel rows
+        # Upsert discovered devices, record ScanResultModel rows, and persist DeviceObservationModel entries
+        active_iface = traffic_monitor.selected_interface or traffic_monitor.get_auto_interface()
         for dev in result.devices:
             # Reconcile: First by MAC (handles DHCP IP changes without unique constraint violations), then by IP
             existing = None
@@ -328,6 +336,20 @@ async def run_discovery(payload: DeviceDiscoverRequest, db: AsyncSession = Depen
                 response_time_ms=dev.response_time_ms
             )
             db.add(scan_item)
+
+            # Record persistent Device Intelligence observation (Phase 2)
+            obs = DeviceObservationModel(
+                device_id=device_id,
+                ip_address=dev.ip,
+                mac_address=dev.mac.strip().upper() if dev.mac else None,
+                interface_name=active_iface,
+                timestamp=now,
+                scan_id=result.scan_id,
+                source="arp" if dev.mac else "tcp_probe",
+                response_status="responding",
+                confidence="confirmed" if dev.mac else "heuristic"
+            )
+            db.add(obs)
 
             # Record in security auditor history for ARP spoofing / DHCP tracking
             security_auditor.record_device_history(dev.ip, dev.mac)
@@ -670,12 +692,12 @@ async def port_scan_endpoint(payload: PortScanRequest, db: AsyncSession = Depend
         ]
         _last_open_ports = open_list
 
-        # Record scan metadata in network_scans with actual measured elapsed duration
+        # Record scan metadata in network_scans with actual measured elapsed duration and actual scan status
         scan_record = NetworkScanModel(
             id=scan_id,
             scan_type="port_scan",
             target_range=f"{payload.target}:{len(payload.ports)} ports",
-            status="completed",
+            status=res.status or ("timed_out" if getattr(res, "timed_out", False) else "completed"),
             total_targets=len(payload.ports),
             found_targets=res.open_count,
             duration_seconds=elapsed_sec
@@ -960,8 +982,12 @@ async def _execute_security_audit(db: AsyncSession) -> List[SecurityFindingSchem
                 f.id = new_finding.id
 
         await db.commit()
-    except Exception:
+    except Exception as e:
         await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database persistence failure during security audit: {str(e)}"
+        ) from e
 
     return evaluated_findings
 
@@ -1266,7 +1292,7 @@ async def get_settings():
     }
 
 # =========================================================================
-# PACKET-LEVEL ANALYSIS & ANOMALY DETECTION (OPTIONAL / PRIVACY-SAFE)
+# PACKET-LEVEL ANALYSIS & CAPTURE SESSIONS
 # =========================================================================
 
 @router.post("/packets/start", response_model=PacketCaptureStatusResponse)
@@ -1282,12 +1308,17 @@ async def start_packet_capture(
             sess_record = PacketCaptureSessionModel(
                 id=status.session_id,
                 interface_name=iface,
-                status="running"
+                status="running",
+                started_at=datetime.now(timezone.utc)
             )
             db.add(sess_record)
             await db.commit()
-        except Exception:
+        except Exception as e:
             await db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database persistence failure for packet session: {str(e)}"
+            ) from e
     return status
 
 @router.post("/packets/stop", response_model=PacketCaptureStatusResponse)
@@ -1308,10 +1339,15 @@ async def stop_packet_capture(db: AsyncSession = Depends(get_db)):
                 sess.other_packets = status.stats.other_packets
                 sess.total_bytes = status.stats.total_bytes
                 sess.duration_seconds = status.stats.duration_seconds
+                sess.error_message = status.error_message
                 sess.stopped_at = datetime.now(timezone.utc)
                 await db.commit()
-        except Exception:
+        except Exception as e:
             await db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database update failure for packet session: {str(e)}"
+            ) from e
     return status
 
 @router.get("/packets/status", response_model=PacketCaptureStatusResponse)
@@ -1319,11 +1355,28 @@ async def get_packet_capture_status():
     """Returns the live packet capture status and protocol distribution."""
     return packet_analyzer.get_status()
 
-@router.get("/security/anomalies", response_model=List[AnomalySchema])
-async def list_network_anomalies(db: AsyncSession = Depends(get_db)):
+@router.get("/packets/sessions")
+async def list_packet_sessions(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db)
+):
+    """Returns historical packet capture sessions."""
+    res = await db.execute(
+        select(PacketCaptureSessionModel)
+        .order_by(desc(PacketCaptureSessionModel.started_at))
+        .limit(limit)
+    )
+    return res.scalars().all()
+
+# =========================================================================
+# ANOMALY MANAGEMENT (SEPARATED EVALUATION & RETRIEVAL)
+# =========================================================================
+
+@router.post("/security/anomalies/evaluate", response_model=List[AnomalySchema])
+async def evaluate_network_anomalies(db: AsyncSession = Depends(get_db)):
     """
-    Evaluates active telemetry, baseline status, and device inventory to detect explainable network anomalies.
-    Persists newly identified anomalies into the database.
+    Evaluates active telemetry, baseline status, and device inventory against deterministic anomaly rules.
+    Persists newly identified anomalies into the database avoiding duplicate active rows.
     """
     global _cached_devices
     down_kbps = 0.0
@@ -1336,9 +1389,21 @@ async def list_network_anomalies(db: AsyncSession = Depends(get_db)):
         icmp_lat = traffic_monitor.latest_telemetry.ping_ms
         loss_pct = traffic_monitor.latest_telemetry.packet_loss_pct
 
+    # Compute historical moving baseline from past metrics in DB
+    metrics_res = await db.execute(
+        select(NetworkMetricModel)
+        .order_by(desc(NetworkMetricModel.timestamp))
+        .limit(30)
+    )
+    recent_m = metrics_res.scalars().all()
+    hist_baseline_KB_s = None
+    if recent_m:
+        total_rates = [(m.download_bytes_sec + m.upload_bytes_sec) / 1024.0 for m in recent_m]
+        hist_baseline_KB_s = sum(total_rates) / len(total_rates)
+
     gw_ip = get_default_gateway()
     gw_mac = get_gateway_mac(gw_ip) if gw_ip else None
-    
+
     # Check baseline status
     res_status = await db.execute(select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "gateway_baseline_status"))
     res_mac = await db.execute(select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "gateway_baseline_mac"))
@@ -1357,21 +1422,24 @@ async def list_network_anomalies(db: AsyncSession = Depends(get_db)):
         devices=_cached_devices,
         gateway_mac_changed=gw_changed,
         gateway_ip=gw_ip,
-        current_gw_mac=gw_mac
+        current_gw_mac=gw_mac,
+        historical_baseline_KB_s=hist_baseline_KB_s
     )
 
-    # Persist detected anomalies avoiding exact duplicates
+    # Persist detected anomalies avoiding duplicate active alerts
     try:
         for a in detected:
             existing_res = await db.execute(
                 select(NetworkAnomalyModel).where(
                     NetworkAnomalyModel.anomaly_type == a.anomaly_type,
+                    NetworkAnomalyModel.target == a.target,
                     NetworkAnomalyModel.status == "active"
                 )
             )
             existing = existing_res.scalars().first()
             if existing:
                 existing.evidence = a.evidence
+                existing.detected_at = a.detected_at
                 a.id = existing.id
             else:
                 new_a = NetworkAnomalyModel(
@@ -1389,31 +1457,158 @@ async def list_network_anomalies(db: AsyncSession = Depends(get_db)):
                 await db.flush()
                 a.id = new_a.id
         await db.commit()
-    except Exception:
+    except Exception as e:
         await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database persistence failure during anomaly evaluation: {str(e)}"
+        ) from e
 
     return detected
+
+@router.get("/security/anomalies", response_model=List[AnomalySchema])
+async def list_active_anomalies(db: AsyncSession = Depends(get_db)):
+    """Returns active, unresolved network anomalies from persistent database."""
+    res = await db.execute(
+        select(NetworkAnomalyModel)
+        .where(NetworkAnomalyModel.status.in_(["active", "investigating"]))
+        .order_by(desc(NetworkAnomalyModel.detected_at))
+    )
+    return res.scalars().all()
+
+@router.get("/security/anomalies/history", response_model=List[AnomalySchema])
+async def list_anomaly_history(
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db)
+):
+    """Returns historical log of all detected anomalies including acknowledged and resolved items."""
+    res = await db.execute(
+        select(NetworkAnomalyModel)
+        .order_by(desc(NetworkAnomalyModel.detected_at))
+        .limit(limit)
+    )
+    return res.scalars().all()
+
+@router.post("/security/anomalies/{anomaly_id}/acknowledge")
+async def acknowledge_anomaly(
+    anomaly_id: int,
+    notes: Optional[str] = Body(None, embed=True),
+    db: AsyncSession = Depends(get_db)
+):
+    """Marks an active anomaly as acknowledged by an operator."""
+    res = await db.execute(select(NetworkAnomalyModel).where(NetworkAnomalyModel.id == anomaly_id))
+    anomaly = res.scalars().first()
+    if not anomaly:
+        raise HTTPException(status_code=404, detail=f"Anomaly #{anomaly_id} not found.")
+
+    anomaly.status = "acknowledged"
+    anomaly.acknowledged_at = datetime.now(timezone.utc)
+    if notes:
+        anomaly.notes = notes
+    await db.commit()
+    return {"status": "ok", "message": f"Anomaly #{anomaly_id} acknowledged.", "anomaly_id": anomaly_id}
+
+@router.post("/security/anomalies/{anomaly_id}/resolve")
+async def resolve_anomaly(
+    anomaly_id: int,
+    notes: Optional[str] = Body(None, embed=True),
+    db: AsyncSession = Depends(get_db)
+):
+    """Marks an active or acknowledged anomaly as resolved."""
+    res = await db.execute(select(NetworkAnomalyModel).where(NetworkAnomalyModel.id == anomaly_id))
+    anomaly = res.scalars().first()
+    if not anomaly:
+        raise HTTPException(status_code=404, detail=f"Anomaly #{anomaly_id} not found.")
+
+    anomaly.status = "resolved"
+    anomaly.resolved_at = datetime.now(timezone.utc)
+    if notes:
+        anomaly.notes = notes
+    await db.commit()
+    return {"status": "ok", "message": f"Anomaly #{anomaly_id} resolved.", "anomaly_id": anomaly_id}
 
 @router.post("/security/anomalies/tune")
 async def tune_anomaly_thresholds(
     traffic_spike_kbps: Optional[float] = Query(None, ge=100.0),
     packet_loss_pct: Optional[float] = Query(None, ge=1.0, le=100.0),
-    latency_surge_ms: Optional[float] = Query(None, ge=10.0)
+    latency_surge_ms: Optional[float] = Query(None, ge=10.0),
+    db: AsyncSession = Depends(get_db)
 ):
-    """Allows operator to adjust sensitivity thresholds for anomaly detection rules."""
+    """Allows operator to calibrate anomaly detection thresholds and persists them across restarts."""
     anomaly_detector.tune_thresholds(
         traffic_spike_kbps=traffic_spike_kbps,
         packet_loss_pct=packet_loss_pct,
         latency_surge_ms=latency_surge_ms
     )
+
+    # Persist thresholds in application settings
+    thresholds_json = json.dumps(anomaly_detector.get_thresholds())
+    res = await db.execute(select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "anomaly_thresholds"))
+    setting = res.scalars().first()
+    if setting:
+        setting.value = thresholds_json
+    else:
+        db.add(ApplicationSettingsModel(
+            key="anomaly_thresholds",
+            value=thresholds_json,
+            description="Calibrated network anomaly detection thresholds"
+        ))
+    await db.commit()
+
     return {
         "status": "ok",
-        "thresholds": {
-            "traffic_spike_threshold_kbps": anomaly_detector.traffic_spike_threshold_kbps,
-            "packet_loss_surge_pct": anomaly_detector.packet_loss_surge_pct,
-            "latency_surge_ms": anomaly_detector.latency_surge_ms
-        }
+        "thresholds": anomaly_detector.get_thresholds()
     }
+
+# =========================================================================
+# CENTRAL NETWORK INTELLIGENCE ENGINE (PHASE 3)
+# =========================================================================
+
+@router.post("/intelligence/evaluate", response_model=List[IntelligenceEventSchema])
+async def evaluate_network_intelligence(db: AsyncSession = Depends(get_db)):
+    """
+    Evaluates multi-domain network evidence across discovery, traffic monitoring,
+    port scans, DNS diagnostics, gateway monitoring, and historical observations.
+    Correlates evidence into explainable intelligence events.
+    """
+    try:
+        events = await network_intelligence_engine.evaluate_network_evidence(db)
+        return events
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Network intelligence evaluation failed: {str(e)}"
+        ) from e
+
+@router.get("/intelligence/events", response_model=List[IntelligenceEventSchema])
+async def list_intelligence_events(
+    category: Optional[str] = Query(None, description="Filter by category (device, traffic, gateway, port, dns)"),
+    severity: Optional[str] = Query(None, description="Filter by severity (info, low, medium, high, critical)"),
+    status: Optional[str] = Query(None, description="Filter by investigation status (unreviewed, investigating, acknowledged, resolved)"),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db)
+):
+    """Returns correlated intelligence events with optional category, severity, and status filters."""
+    return await network_intelligence_engine.list_events(db, category=category, severity=severity, status=status, limit=limit)
+
+@router.post("/intelligence/events/{event_id}/status")
+async def update_intelligence_event_status(
+    event_id: str,
+    status: str = Body(..., embed=True),
+    db: AsyncSession = Depends(get_db)
+):
+    """Updates the investigation lifecycle status of an intelligence event."""
+    valid_statuses = ("unreviewed", "investigating", "acknowledged", "resolved", "dismissed")
+    if status not in valid_statuses:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid investigation status '{status}'. Valid options: {', '.join(valid_statuses)}"
+        )
+
+    updated = await network_intelligence_engine.update_event_status(db, event_id, status)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Intelligence event '{event_id}' not found.")
+    return {"status": "ok", "event_id": event_id, "investigation_status": status}
 
 # =========================================================================
 # BEGINNER LEARNING MODE & DATA RETENTION
@@ -1433,23 +1628,74 @@ async def list_learning_topics():
 
 @router.post("/history/cleanup")
 async def cleanup_historical_records(
-    retention_days: int = Query(default=30, ge=1, le=365),
+    retention_days: Optional[int] = Query(None, ge=1, le=365, description="Global retention days fallback"),
+    metrics_retention_days: int = Query(default=7, ge=1, le=365, description="Retention days for time-series metrics"),
+    diagnostics_retention_days: int = Query(default=14, ge=1, le=365, description="Retention days for ping/dns diagnostics"),
+    scans_retention_days: int = Query(default=30, ge=1, le=365, description="Retention days for discovery scans and observations"),
+    security_retention_days: int = Query(default=90, ge=1, le=365, description="Retention days for resolved security findings and anomalies"),
     db: AsyncSession = Depends(get_db)
 ):
-    """Prunes time-series metrics and diagnostic results older than retention period."""
+    """
+    Granular data retention policy enforcer.
+    Allows different retention periods for high-frequency operational metrics vs long-term security evidence.
+    """
     from datetime import timedelta
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    now = datetime.now(timezone.utc)
+
+    # If global retention_days was specified, use it as baseline
+    m_days = retention_days if retention_days is not None else metrics_retention_days
+    d_days = retention_days if retention_days is not None else diagnostics_retention_days
+    sc_days = retention_days if retention_days is not None else scans_retention_days
+    sec_days = retention_days if retention_days is not None else security_retention_days
+
+    metrics_cutoff = now - timedelta(days=m_days)
+    diag_cutoff = now - timedelta(days=d_days)
+    scans_cutoff = now - timedelta(days=sc_days)
+    sec_cutoff = now - timedelta(days=sec_days)
+
     try:
-        del_metrics = await db.execute(delete(NetworkMetricModel).where(NetworkMetricModel.timestamp < cutoff))
-        del_pings = await db.execute(delete(PingResultModel).where(PingResultModel.created_at < cutoff))
-        del_dns = await db.execute(delete(DNSResultModel).where(DNSResultModel.created_at < cutoff))
+        del_metrics = await db.execute(delete(NetworkMetricModel).where(NetworkMetricModel.timestamp < metrics_cutoff))
+        del_pings = await db.execute(delete(PingResultModel).where(PingResultModel.created_at < diag_cutoff))
+        del_dns = await db.execute(delete(DNSResultModel).where(DNSResultModel.created_at < diag_cutoff))
+        del_obs = await db.execute(delete(DeviceObservationModel).where(DeviceObservationModel.timestamp < scans_cutoff))
+        del_scans = await db.execute(delete(NetworkScanModel).where(NetworkScanModel.created_at < scans_cutoff))
+        del_findings = await db.execute(
+            delete(SecurityFindingModel).where(
+                SecurityFindingModel.status.in_(["resolved", "dismissed"]),
+                SecurityFindingModel.created_at < sec_cutoff
+            )
+        )
+        del_anomalies = await db.execute(
+            delete(NetworkAnomalyModel).where(
+                NetworkAnomalyModel.status.in_(["resolved", "dismissed"]),
+                NetworkAnomalyModel.detected_at < sec_cutoff
+            )
+        )
+        del_intel = await db.execute(
+            delete(IntelligenceEventModel).where(
+                IntelligenceEventModel.investigation_status.in_(["resolved", "dismissed"]),
+                IntelligenceEventModel.timestamp < sec_cutoff
+            )
+        )
+
         await db.commit()
         return {
             "status": "ok",
-            "message": f"Historical data older than {retention_days} days pruned successfully.",
+            "message": "Historical data retention cleanup completed successfully.",
+            "cutoff_timestamp": metrics_cutoff.isoformat(),
             "metrics_pruned": del_metrics.rowcount if hasattr(del_metrics, "rowcount") else 0,
-            "cutoff_timestamp": cutoff.isoformat()
+            "diagnostics_pruned": (del_pings.rowcount if hasattr(del_pings, "rowcount") else 0) + (del_dns.rowcount if hasattr(del_dns, "rowcount") else 0),
+            "observations_pruned": del_obs.rowcount if hasattr(del_obs, "rowcount") else 0,
+            "scans_pruned": del_scans.rowcount if hasattr(del_scans, "rowcount") else 0,
+            "security_records_pruned": (del_findings.rowcount if hasattr(del_findings, "rowcount") else 0) + (del_anomalies.rowcount if hasattr(del_anomalies, "rowcount") else 0),
+            "retention_policy": {
+                "metrics_days": m_days,
+                "diagnostics_days": d_days,
+                "scans_days": sc_days,
+                "security_days": sec_days
+            }
         }
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to prune historical records: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to prune historical records: {str(e)}") from e
+

@@ -25,9 +25,10 @@ This document details the architectural principles, component interactions, and 
 |  * app.network.ports: Non-blocking TCP port scanner with anti-rebinding IP pinning|
 |  * app.network.interfaces: Cross-platform adapter enumeration (psutil + socket)   |
 |  * app.network.diagnostics: Subprocess-isolated ping/traceroute + DNS resolver    |
-|  * app.network.packet_analysis: Zero-payload header inspection & protocol stats   |
+|  * app.network.packet_analysis: Scapy packet capture with Npcap/raw socket check   |
 |  * app.security.auditor: Heuristic security analyzer & gateway MAC verification   |
-|  * app.security.anomaly: Rule-based network anomaly detection engine              |
+|  * app.security.anomaly: Rule-based network anomaly engine with dynamic baseline   |
+|  * app.intelligence.engine: Central correlation engine across all network domains  |
 |  * app.network.learning: Interactive educational content provider                 |
 +-----------------------------------------------------------------------------------+
                                    |
@@ -62,18 +63,32 @@ This document details the architectural principles, component interactions, and 
 - **Distinct State Reporting**: Accurately classifies port responses as `open`, `closed`, `filtered`, `timed_out`, or `error`.
 - **Preserved Partial Results**: On deadline expiration or user cancellation, all completed port states are preserved; only unfinished ports are marked `timed_out`.
 
-### 3. Security Auditor & Anomaly Detection
-- **Gateway MAC Baseline**:
-  - Verifies that any manually confirmed gateway MAC matches the live detected gateway interface.
-  - Detects gateway MAC alterations indicative of Layer 2 ARP spoofing attacks.
+### 3. Central Network Intelligence & Anomaly Management
+- **Central Intelligence Engine (`app.intelligence.engine`)**:
+  - Ingests normalized evidence across discovery sweeps, device observations, traffic metrics, packet statistics, port diagnostics, and DNS queries.
+  - Implements explainable correlation rules (`NETINT-IPCONF-01`, `NETINT-DHCP-02`, `NETINT-GW-03`, `NETINT-PORT-04`, `NETINT-LOSS-07`) mapping evidence to explicit confidence ratings.
+  - Generates `IntelligenceEventModel` entries with actionable remediation advice and investigation status tracking.
+- **Persistent Device Observation Model**:
+  - Records granular host activity snapshots in `device_observations`.
+  - Distinguishes legitimate DHCP renewal reassignments from simultaneous IP conflict anomalies.
 - **Rule-Based Anomaly Engine**:
-  - Evaluates sliding window traffic metrics for abnormal throughput surges, unexpected packet loss spikes, and sudden clusters of new unauthenticated devices.
-  - Provides tunable thresholds via `POST /api/security/anomalies/tune`.
+  - Derives dynamic sliding-window traffic baselines from stored database metrics.
+  - Evaluates traffic throughput spikes (in explicit KB/s, MB/s, and Mbps), packet loss surges, and latency surges.
+  - Provides lifecycle endpoints (`acknowledge`, `resolve`) and persistent threshold tuning.
 
-### 4. Packet Analysis Module
+### 4. Packet Analysis Module & Driver Detection
 - **Zero-Payload Policy**: Inspects packet headers (protocol type, source/destination IP, source/destination port, packet length) only. Payload bytes are strictly discarded to guarantee privacy.
-- **Cross-Platform Graceful Fallback**: Detects whether raw socket capture permissions are available; falls back smoothly to safe socket heuristics when running in non-elevated user mode.
+- **Honest Driver Capability Inspection**:
+  - Windows: Explicitly inspects for Npcap in WinPcap API-compatible mode (`wpcap.dll`).
+  - Linux: Explicitly tests `CAP_NET_RAW` / root socket creation.
+  - When drivers are not installed, NetScope informs the operator and operates safely in zero-admin mode without crashing or hanging.
+- **Continuous Operation & Thread Safety**: Executes continuous capture loop in dedicated background thread with atomic locks and DB session tracking.
 
-### 5. Data Persistence & Migrations
+### 5. WebSocket Telemetry & Client Queue Isolation
+- **Per-Client Bounded Queues**: `TrafficMonitor` maintains independent `asyncio.Queue(maxsize=10)` queues for each connected WebSocket client.
+- **Lag Prevention**: Slow or unresponsive frontend clients automatically drop older frames without delaying other subscribers or blocking the backend broadcaster.
+
+### 6. Data Persistence & Authoritative Alembic Migrations
 - **SQLite WAL Mode**: Configured with `PRAGMA journal_mode=WAL` for concurrent reader/writer operations without lock contention.
-- **Alembic Versioning**: All schema alterations are codified in `backend/alembic/versions/` and upgraded using `alembic upgrade head`.
+- **Alembic Authoritative Versioning**: Database initialization is strictly managed via Alembic migrations (`577e827427ad` base + `2ca1594d866b` intelligence extensions), executed automatically on application startup.
+- **Granular Data Retention**: Multi-tier retention policies allow independent cleanup cycles for metrics (7d), diagnostics (14d), discovery scans (30d), and security audit records (90d).

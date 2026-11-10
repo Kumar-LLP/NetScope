@@ -17,7 +17,9 @@ import {
   AnomalyThresholds,
   PacketCaptureStatus,
   LearningTopic,
-  PaginatedDevicesResponse
+  PaginatedDevicesResponse,
+  IntelligenceEvent,
+  PacketCaptureSession
 } from '../types/network';
 
 const API_BASE = (import.meta as any).env?.VITE_API_URL || '/api';
@@ -317,27 +319,94 @@ export const api = {
     return res.json();
   },
 
-  async getAnomalies(limit: number = 50, severity?: string): Promise<AnomalyEvent[]> {
-    const q = new URLSearchParams({ limit: limit.toString() });
-    if (severity) q.append('severity', severity);
-    const res = await fetch(`${API_BASE}/security/anomalies?${q.toString()}`);
-    if (!res.ok) throw new Error('Failed to fetch anomalies');
+  async evaluateAnomalies(): Promise<AnomalyEvent[]> {
+    const res = await fetch(`${API_BASE}/security/anomalies/evaluate`, { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to evaluate anomalies');
+    return res.json();
+  },
+
+  async getAnomalies(limit: number = 50): Promise<AnomalyEvent[]> {
+    const res = await fetch(`${API_BASE}/security/anomalies?limit=${limit}`);
+    if (!res.ok) throw new Error('Failed to fetch active anomalies');
+    return res.json();
+  },
+
+  async getAnomalyHistory(limit: number = 100): Promise<AnomalyEvent[]> {
+    const res = await fetch(`${API_BASE}/security/anomalies/history?limit=${limit}`);
+    if (!res.ok) throw new Error('Failed to fetch anomaly history');
+    return res.json();
+  },
+
+  async acknowledgeAnomaly(id: number, notes?: string): Promise<{ status: string; id: number }> {
+    const res = await fetch(`${API_BASE}/security/anomalies/${id}/acknowledge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes })
+    });
+    if (!res.ok) throw new Error('Failed to acknowledge anomaly');
+    return res.json();
+  },
+
+  async resolveAnomaly(id: number, notes?: string): Promise<{ status: string; id: number }> {
+    const res = await fetch(`${API_BASE}/security/anomalies/${id}/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes })
+    });
+    if (!res.ok) throw new Error('Failed to resolve anomaly');
     return res.json();
   },
 
   async tuneAnomalyThresholds(thresholds: AnomalyThresholds): Promise<{ status: string; thresholds: AnomalyThresholds }> {
-    const res = await fetch(`${API_BASE}/security/anomalies/tune`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(thresholds)
+    const q = new URLSearchParams();
+    if (thresholds.traffic_spike_kbps) q.append('traffic_spike_kbps', thresholds.traffic_spike_kbps.toString());
+    if (thresholds.packet_loss_pct) q.append('packet_loss_pct', thresholds.packet_loss_pct.toString());
+    if (thresholds.latency_surge_ms) q.append('latency_surge_ms', thresholds.latency_surge_ms.toString());
+
+    const res = await fetch(`${API_BASE}/security/anomalies/tune?${q.toString()}`, {
+      method: 'POST'
     });
     if (!res.ok) throw new Error('Failed to tune anomaly thresholds');
+    return res.json();
+  },
+
+  async evaluateIntelligence(): Promise<IntelligenceEvent[]> {
+    const res = await fetch(`${API_BASE}/intelligence/evaluate`, { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to evaluate network intelligence');
+    return res.json();
+  },
+
+  async getIntelligenceEvents(params?: { category?: string; severity?: string; status?: string; limit?: number }): Promise<IntelligenceEvent[]> {
+    const q = new URLSearchParams();
+    if (params?.category) q.append('category', params.category);
+    if (params?.severity) q.append('severity', params.severity);
+    if (params?.status) q.append('status', params.status);
+    if (params?.limit) q.append('limit', params.limit.toString());
+
+    const res = await fetch(`${API_BASE}/intelligence/events?${q.toString()}`);
+    if (!res.ok) throw new Error('Failed to fetch intelligence events');
+    return res.json();
+  },
+
+  async updateIntelligenceEventStatus(eventId: string, status: string): Promise<{ status: string; event_id: string }> {
+    const res = await fetch(`${API_BASE}/intelligence/events/${eventId}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status })
+    });
+    if (!res.ok) throw new Error('Failed to update event status');
     return res.json();
   },
 
   async getPacketCaptureStatus(): Promise<PacketCaptureStatus> {
     const res = await fetch(`${API_BASE}/packets/status`);
     if (!res.ok) throw new Error('Failed to fetch packet capture status');
+    return res.json();
+  },
+
+  async getPacketSessions(limit: number = 20): Promise<PacketCaptureSession[]> {
+    const res = await fetch(`${API_BASE}/packets/sessions?limit=${limit}`);
+    if (!res.ok) throw new Error('Failed to fetch packet capture sessions');
     return res.json();
   },
 

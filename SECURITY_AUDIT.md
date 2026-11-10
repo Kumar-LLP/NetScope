@@ -44,6 +44,26 @@ An exhaustive security audit was conducted covering frontend React code, FastAPI
 - **Vulnerability**: Subnet filtering in `discovery.py` used naive `.endswith(".255")`, which improperly excluded valid host addresses in non-/24 subnets.
 - **Remediation**: Replaced with exact mathematical boundary checks using `ipaddress.ip_network` (`network_address` and `broadcast_address`).
 
+### 7. DNS Security Claims & Transport Encryption Misclassification (HIGH - Remediated)
+- **Weakness**: Security rule SEC-003 previously treated resolver IP addresses (e.g., Cloudflare `1.1.1.1` or Google `8.8.8.8`) as proof of transport encryption.
+- **Remediation**: Corrected rule SEC-003 logic. Explicitly documents that standard OS DNS queries use UDP port 53 in plaintext regardless of resolver IP, warning operators of local transit hop exposure unless dedicated local DoH/DoT forwarders are running.
+
+### 8. Gateway MAC Divergence Root-Cause Misclassification (MEDIUM - Remediated)
+- **Weakness**: Gateway MAC changes were previously classified with `confidence="confirmed"` as malicious ARP poisoning.
+- **Remediation**: Corrected confidence rating to `high`. Explains that while MAC divergence from baseline is confirmed with 100% mathematical certainty, the underlying root cause may be legitimate (mesh Wi-Fi AP roaming, 2.4/5GHz band steering, or router hardware replacement) as well as malicious ARP spoofing.
+
+### 9. False Offline Device Reconciliation (HIGH - Remediated)
+- **Weakness**: Cancelled, partial, or timed-out discovery sweeps previously marked unscanned devices in the inventory as `offline`.
+- **Remediation**: Enforced in `endpoints.py` that existing inventory hosts are only reconciled offline if the discovery sweep finishes with status `completed` across the entire scanned subnet.
+
+### 10. Database Persistence Exception Swallowing (HIGH - Remediated)
+- **Weakness**: Transaction failures during security auditing, anomaly detection, and packet capture persistence were silently swallowed via broad `try/except: await db.rollback()` blocks, hiding database failures.
+- **Remediation**: Replaced swallowed exceptions with explicit logging and `HTTPException(status_code=500, detail=...)`.
+
+### 11. False Packet Capture Capability Reporting (MEDIUM - Remediated)
+- **Weakness**: Previously, `packet_analyzer.is_supported()` returned `True` merely because `import scapy` succeeded, even when Npcap drivers were absent on Windows.
+- **Remediation**: Implemented genuine driver capability inspection testing Npcap (`wpcap.dll`) on Windows and raw socket privileges on Linux, providing honest status reporting and graceful degradation to zero-admin mode.
+
 ---
 
 ## 🛡️ Active Security Guardrails

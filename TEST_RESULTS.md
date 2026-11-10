@@ -4,11 +4,11 @@
 **Platform**: Windows 11 Enterprise (64-bit)  
 **Python Runtime**: Python 3.14.5  
 **Test Suite**: `backend/tests/test_api.py`  
-**Total Tests**: 36  
-**Passed**: 36 (100%)  
+**Total Tests**: 47  
+**Passed**: 47 (100%)  
 **Failed**: 0  
 **Skipped**: 0  
-**Duration**: 25.79 seconds  
+**Duration**: 26.71 seconds  
 
 ---
 
@@ -20,7 +20,7 @@
 | 2 | `test_interfaces_endpoint` | Interfaces | PASSED | Enumerates network adapters with IP, MAC, speed, and default route |
 | 3 | `test_overview_endpoint` | Telemetry | PASSED | Provides local IP, CIDR, default gateway, and connection state |
 | 4 | `test_ip_info_calculator` | Diagnostics | PASSED | Computes network, broadcast, wildcard mask, and usable host count |
-| 5 | `test_port_scan_unauthorized_rejected` | Security | PASSED | Rejects port scans when `authorized=False` with HTTP 400 |
+| 5 | `test_port_scan_unauthorized_rejected` | Security | PASSED | Rejects port scans when `authorized=False` with HTTP 403 |
 | 6 | `test_port_scan_authorized_loopback` | Diagnostics | PASSED | Scans authorized localhost ports with distinct state tracking |
 | 7 | `test_security_findings_endpoint` | Security | PASSED | Retrieves heuristic security findings from database |
 | 8 | `test_stop_scan_and_progress_endpoints` | Discovery | PASSED | Verifies scan cancellation and progress reporting endpoints |
@@ -52,8 +52,19 @@
 | 34 | `test_learning_mode_topics` | Learning | PASSED | Validates structured educational topics and live telemetry links |
 | 35 | `test_paginated_device_inventory` | Inventory | PASSED | Tests server-side pagination, searching, and sorting of devices |
 | 36 | `test_history_cleanup_endpoint` | Maintenance | PASSED | Prunes database metrics and diagnostics older than retention limit |
+| 37 | `test_alembic_upgrade_from_empty_database` | Migrations | PASSED | Validates Alembic creates all 15 tables from an empty database |
+| 38 | `test_packet_capture_real_capability_check` | Inspection | PASSED | Validates genuine Npcap and raw socket capability reporting |
+| 39 | `test_packet_capture_lifecycle_and_stop` | Inspection | PASSED | Tests continuous loop, stop signal, and clean thread completion |
+| 40 | `test_port_scan_history_partial_status` | Diagnostics | PASSED | Asserts NetworkScanModel persists partial/completed statuses |
+| 41 | `test_discovery_offline_marking_reconciliation` | Discovery | PASSED | Ensures non-completed discovery scans do not mark devices offline |
+| 42 | `test_device_observation_persistence_and_dhcp` | Intelligence | PASSED | Tests DeviceObservationModel tracking DHCP shifts across IPs |
+| 43 | `test_anomaly_management_lifecycle` | Anomaly | PASSED | Verifies evaluate -> active list -> acknowledge -> resolve -> history |
+| 44 | `test_central_intelligence_evaluation` | Intelligence | PASSED | Asserts multi-domain correlation engine execution and event status |
+| 45 | `test_websocket_slow_client_queue_isolation` | Streaming | PASSED | Verifies slow client queue drops oldest message without lagging others |
+| 46 | `test_granular_history_cleanup` | Maintenance | PASSED | Validates granular day policies for metrics, diagnostics, scans, and security |
+| 47 | `test_database_persistence_error_propagation` | Resilience | PASSED | Asserts database transaction failures propagate explicit HTTP 500 |
 
 ---
 
 ## 🎯 Verification Conclusion
-The NetScope test suite has achieved **100% pass rate (36/36)** across all functional, security, and integration test specifications.
+The NetScope test suite has achieved a **100% pass rate (47/47)** across all functional, security, performance, and regression test specifications.

@@ -30,15 +30,20 @@
 ## 🌟 Key Highlights
 
 - ⚡ **Real Hardware Telemetry**: Direct interface metrics sampled via `psutil` with zero fabricated or mocked live figures.
+- 🧠 **Central Network Intelligence Engine**: Multi-domain correlation engine evaluating evidence from ARP discovery, traffic monitoring, packet analysis, port diagnostics, and DNS to produce explainable security events.
+- 📜 **Persistent Device Observations**: Complete audit observation model tracking IP shifts, DHCP lease reallocations, and IP conflict detection over time.
 - 🔍 **Safe Device Discovery**: Subnet host sweeps combining concurrent non-blocking TCP socket probes with OS ARP cache inspection without requiring Administrator privileges on Windows 11.
 - 🏢 **Local IEEE OUI Vendor Database**: Offline manufacturer resolution (Apple, Intel, TP-Link, Cisco, Lenovo, Samsung, Dell, etc.) with zero cloud dependency.
 - 🕸️ **Interactive Dynamic Topology**: Interactive React Flow network canvas rendering draggable nodes, animated bezier data lines, and node inspection drawers.
 - 🧰 **Diagnostic Suite**: Genuine system ICMP Ping, multi-record DNS resolution (A, AAAA, MX, NS, TXT, CNAME), Traceroute hop discovery, and IPv4 CIDR subnetting calculator.
-- 🎯 **Controlled Port Scanner**: Multi-threaded TCP connect port scanner with anti-rebinding DNS validation, IP pinning, predefined service profiles (Top 20, Web, Databases, Remote CLI), banner grabbing, and authorization confirmation guardrails.
-- 🛡️ **Automated Security Insights**: Heuristic analysis engine with structured confidence ratings detecting gateway MAC changes (ARP poisoning risk), duplicate IP conflicts, and unencrypted management services (Telnet 23, FTP 21).
+- 🎯 **Controlled Port Scanner**: Multi-threaded TCP connect port scanner with anti-rebinding DNS validation, IP pinning, predefined service profiles, banner grabbing, and full status tracking (`completed`, `partial`, `timed_out`).
+- 🛡️ **Automated Security Insights**: Heuristic analysis engine with structured confidence ratings detecting gateway MAC changes (ARP poisoning risk), duplicate IP conflicts, and unencrypted cleartext services.
+- 🚨 **Enterprise Anomaly Management**: Full lifecycle management (acknowledge and resolve), sliding-window dynamic baselining, and persistent threshold tuning stored in the database.
+- 📦 **Opt-In Packet Capture**: Layer-2/3 packet header analysis using Scapy with genuine Npcap driver detection on Windows and root/raw socket checks on Linux; degrades gracefully in zero-admin mode.
 - 🔒 **Defense-in-Depth & CWE-1236 Protection**: Neutralizes Spreadsheet Formula Injection across CSV exports, validates MAC address structures, and prevents internal configuration disclosure.
 - ⚡ **Dynamic Code Splitting**: Frontend route chunking with `React.lazy()` and `<React.Suspense>` for lightning-fast sub-second initial dashboard loads.
-- 📡 **Real-Time WebSocket Stream**: Live telemetry pushed every 1.5 seconds over `/ws/network` directly into high-contrast dark NOC charts powered by Recharts.
+- 📡 **Isolated Real-Time WebSocket Streaming**: Live telemetry pushed every 1.5 seconds over `/ws/network` with bounded per-client queues (`maxsize=10`) preventing slow clients from causing stream latency.
+- 🗄️ **Authoritative Alembic Migrations**: 100% idempotent database schema migrations with automated startup synchronization.
 - 🎓 **Beginner Learning Mode**: Built-in interactive networking guide explaining IP, MAC, DNS, Gateway, Subnet, Ports, Latency, and TCP/UDP.
 
 ---
@@ -170,6 +175,17 @@ cd backend
 - `test_learning_mode_topics`: **PASSED** (Verifies educational topics linked to live telemetry keys).
 - `test_paginated_device_inventory`: **PASSED** (Verifies server-side pagination, search, and sorting).
 - `test_history_cleanup_endpoint`: **PASSED** (Verifies retention cleanup of old metrics and diagnostics).
+- `test_alembic_upgrade_from_empty_database`: **PASSED** (Verifies Alembic upgrades a brand new database from scratch to head).
+- `test_packet_capture_real_capability_check`: **PASSED** (Verifies honest driver capability inspection for Npcap and raw sockets).
+- `test_packet_capture_lifecycle_and_stop`: **PASSED** (Verifies continuous loop operation, stop, and clean thread completion).
+- `test_port_scan_history_partial_status`: **PASSED** (Verifies accurate persistence of partial and completed port scan statuses).
+- `test_discovery_offline_marking_reconciliation`: **PASSED** (Verifies that non-completed discovery runs do not incorrectly mark devices offline).
+- `test_device_observation_persistence_and_dhcp`: **PASSED** (Verifies persistent observation model and DHCP IP reassignment tracking).
+- `test_anomaly_management_lifecycle`: **PASSED** (Verifies evaluate -> active list -> acknowledge -> resolve -> history pipeline).
+- `test_central_intelligence_evaluation`: **PASSED** (Verifies multi-domain correlation engine execution and event status updates).
+- `test_websocket_slow_client_queue_isolation`: **PASSED** (Verifies slow client queue drops oldest message without blocking other subscribers).
+- `test_granular_history_cleanup`: **PASSED** (Verifies multi-tier retention days for metrics, diagnostics, scans, and security findings).
+- `test_database_persistence_error_propagation`: **PASSED** (Verifies database errors raise HTTP 500 without swallowing exceptions).
 
 ---
 
@@ -184,7 +200,7 @@ For complete architectural specifications, API schemas, and security reports:
 - [⚠️ Known Limitations & Boundaries](KNOWN_LIMITATIONS.md)
 - [🗄️ Database Architecture & Migrations](DATABASE.md)
 - [🧪 Testing & QA Automation Guide](TESTING.md)
-- [📊 Test Execution Log (36/36 Passed)](TEST_RESULTS.md)
+- [📊 Test Execution Log (47/47 Passed)](TEST_RESULTS.md)
 - [🤝 Contributing Guidelines](CONTRIBUTING.md)
 - [📝 Project Changelog](CHANGELOG.md)
 
@@ -192,7 +208,9 @@ For complete architectural specifications, API schemas, and security reports:
 
 ## 🛡️ Security Guardrails & Permissions
 
-- **Non-Elevated Privilege Safe**: Does not require Administrator privileges on Windows 11. Scans use standard user-mode TCP sockets and system utilities.
+- **Non-Elevated Privilege Safe**: Does not require Administrator privileges on Windows 11. Discovery sweeps use standard user-mode TCP sockets and system ARP cache.
+- **Packet Capture Driver Requirements**: Opt-in packet header capture uses Scapy. On Windows, it requires Npcap (installed in WinPcap API-compatible mode). On Linux, it requires `CAP_NET_RAW` or root privileges. When drivers are not installed, NetScope automatically informs the operator and operates safely in zero-admin mode without crashing or hanging.
+- **Accurate DNS Transport Security**: Standard operating system DNS queries operate over UDP port 53 in plaintext regardless of resolver IP address (such as 1.1.1.1 or 8.8.8.8) unless explicit local DoH/DoT forwarders are configured. NetScope accurately reflects transport layer exposure.
 - **Zero Shell Interpolation**: All external invocations (`ping`, `tracert`, `arp`) pass explicit tokenized argument arrays. Shell interpolation (`shell=True`) is strictly prohibited.
 - **Strict Target Authorization**: Port diagnostics require explicit user confirmation acknowledging target ownership before execution.
 - **Zero Payload Capture**: NetScope measures byte counts and header metadata. It never captures, inspects, or logs plaintext traffic payloads or credentials.

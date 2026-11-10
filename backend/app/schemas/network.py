@@ -243,6 +243,7 @@ class PacketCaptureStatusResponse(BaseModel):
     interface_name: Optional[str] = None
     stats: PacketStats
     note: Optional[str] = None
+    error_message: Optional[str] = None
 
 class AnomalySchema(BaseModel):
     id: Optional[int] = None
@@ -255,7 +256,37 @@ class AnomalySchema(BaseModel):
     confidence: str = "confirmed" # 'confirmed', 'potential'
     threshold_trigger: Optional[str] = None
     detected_at: Optional[datetime] = None
-    status: str = "active" # 'active', 'investigating', 'resolved', 'false_positive'
+    status: str = "active" # 'active', 'acknowledged', 'resolved', 'false_positive'
+    acknowledged_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
+    notes: Optional[str] = None
+
+class IntelligenceEventSchema(BaseModel):
+    id: Optional[int] = None
+    event_id: str
+    category: str
+    severity: str
+    confidence: str
+    timestamp: datetime
+    affected_device_ip: Optional[str] = None
+    affected_device_mac: Optional[str] = None
+    evidence_references: str
+    explanation: str
+    recommended_action: str
+    investigation_status: str = "unreviewed"
+    resolved_at: Optional[datetime] = None
+
+class DeviceObservationSchema(BaseModel):
+    id: Optional[int] = None
+    device_id: Optional[int] = None
+    ip_address: str
+    mac_address: Optional[str] = None
+    interface_name: Optional[str] = None
+    timestamp: datetime
+    scan_id: Optional[str] = None
+    source: str = "arp"
+    response_status: str = "responding"
+    confidence: str = "confirmed"
 
 class LearningTopic(BaseModel):
     id: str

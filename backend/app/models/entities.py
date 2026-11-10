@@ -185,6 +185,7 @@ class PacketCaptureSessionModel(Base):
     other_packets = Column(Integer, default=0)
     total_bytes = Column(Integer, default=0)
     duration_seconds = Column(Float, default=0.0)
+    error_message = Column(Text, nullable=True)
     started_at = Column(DateTime, default=utcnow)
     stopped_at = Column(DateTime, nullable=True)
 
@@ -202,5 +203,41 @@ class NetworkAnomalyModel(Base):
     confidence = Column(String(32), default="confirmed") # 'confirmed', 'potential'
     threshold_trigger = Column(String(128), nullable=True)
     detected_at = Column(DateTime, default=utcnow)
-    status = Column(String(32), default="active") # 'active', 'investigating', 'resolved', 'false_positive'
+    status = Column(String(32), default="active") # 'active', 'acknowledged', 'resolved', 'false_positive'
+    acknowledged_at = Column(DateTime, nullable=True)
     resolved_at = Column(DateTime, nullable=True)
+    notes = Column(Text, nullable=True)
+
+
+class DeviceObservationModel(Base):
+    __tablename__ = "device_observations"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey("network_devices.id"), nullable=True, index=True)
+    ip_address = Column(String(45), nullable=False, index=True)
+    mac_address = Column(String(17), nullable=True, index=True)
+    interface_name = Column(String(128), nullable=True)
+    timestamp = Column(DateTime, default=utcnow, index=True)
+    scan_id = Column(String(64), ForeignKey("network_scans.id", ondelete="SET NULL"), nullable=True, index=True)
+    source = Column(String(32), nullable=False, default="arp") # 'arp', 'tcp_probe', 'traffic_monitor', 'dhcp', 'mdns'
+    response_status = Column(String(32), default="responding") # 'responding', 'unresponsive', 'conflict'
+    confidence = Column(String(32), default="confirmed") # 'confirmed', 'high', 'heuristic'
+
+
+class IntelligenceEventModel(Base):
+    __tablename__ = "intelligence_events"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    event_id = Column(String(64), unique=True, index=True, nullable=False)
+    category = Column(String(64), nullable=False) # 'device', 'traffic', 'security', 'dns', 'gateway', 'port'
+    severity = Column(String(16), nullable=False) # 'info', 'low', 'medium', 'high', 'critical'
+    confidence = Column(String(32), nullable=False) # 'confirmed', 'high', 'moderate', 'heuristic'
+    timestamp = Column(DateTime, default=utcnow, index=True)
+    affected_device_ip = Column(String(45), nullable=True, index=True)
+    affected_device_mac = Column(String(17), nullable=True, index=True)
+    evidence_references = Column(Text, nullable=False) # JSON dictionary of raw telemetry & scan refs
+    explanation = Column(Text, nullable=False)
+    recommended_action = Column(Text, nullable=False)
+    investigation_status = Column(String(32), default="unreviewed") # 'unreviewed', 'investigating', 'acknowledged', 'resolved', 'dismissed'
+    resolved_at = Column(DateTime, nullable=True)
+

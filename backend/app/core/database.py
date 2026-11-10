@@ -1,7 +1,14 @@
+import logging
+import asyncio
+from pathlib import Path
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import event, text
+from sqlalchemy import event
+from alembic.config import Config
+from alembic import command
 from app.core.config import settings
+
+logger = logging.getLogger("netscope.database")
 
 Base = declarative_base()
 
@@ -11,7 +18,7 @@ engine = create_async_engine(
     connect_args={"check_same_thread": False}
 )
 
-# Enable WAL (Write-Ahead Logging) mode in SQLite for concurrency
+# Enable WAL (Write-Ahead Logging) mode in SQLite for high-concurrency non-blocking reads
 @event.listens_for(engine.sync_engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
@@ -34,16 +41,25 @@ async def get_db():
         finally:
             await session.close()
 
-import logging
-
-logger = logging.getLogger("netscope.database")
+def run_alembic_migrations():
+    """
+    Authoritative database migration mechanism.
+    Runs Alembic schema migrations directly to HEAD, ensuring consistent versioning
+    while safely supporting both fresh installations and existing databases.
+    """
+    alembic_ini_path = Path(__file__).resolve().parent.parent.parent / "alembic.ini"
+    if alembic_ini_path.exists():
+        alembic_cfg = Config(str(alembic_ini_path))
+        alembic_cfg.set_main_option("sqlalchemy.url", settings.SYNC_DATABASE_URL)
+        command.upgrade(alembic_cfg, "head")
+        logger.info("Authoritative Alembic migrations applied successfully to HEAD.")
+    else:
+        logger.warning(f"Alembic configuration not found at {alembic_ini_path}. Skipping migration.")
 
 async def init_db():
-    """Initializes database schema and ensures all tables are created cleanly."""
+    """Initializes database schema authoritatively using Alembic."""
     try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-            logger.info("Database schema initialized successfully.")
+        await asyncio.to_thread(run_alembic_migrations)
     except Exception as e:
-        logger.error(f"Critical error during database schema initialization: {e}")
+        logger.error(f"Critical error during authoritative database migration: {e}")
         raise RuntimeError(f"Database initialization failed: {e}") from e

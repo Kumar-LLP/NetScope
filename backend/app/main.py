@@ -48,13 +48,27 @@ async def lifespan(app: FastAPI):
                 )
                 for d in db_devs
             ])
+            # Load saved anomaly thresholds if present
+            from app.models.entities import ApplicationSettingsModel
+            from app.security.anomaly import anomaly_detector
+            import json
+            res_th = await session.execute(select(ApplicationSettingsModel).where(ApplicationSettingsModel.key == "anomaly_thresholds"))
+            th_row = res_th.scalars().first()
+            if th_row and th_row.value:
+                try:
+                    data = json.loads(th_row.value)
+                    anomaly_detector.tune_thresholds(**data)
+                except Exception:
+                    pass
     except Exception:
         pass
 
     monitor_task = asyncio.create_task(traffic_monitor.start_loop())
     yield
-    # Shutdown: Stop traffic monitor cleanly
+    # Shutdown: Stop traffic monitor and packet analyzer cleanly
     traffic_monitor.stop_loop()
+    from app.network.packet_analysis import packet_analyzer
+    packet_analyzer.stop_capture()
     monitor_task.cancel()
     try:
         await monitor_task

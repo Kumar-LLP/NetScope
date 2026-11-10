@@ -2,55 +2,57 @@ import asyncio
 import time
 import psutil
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, Any, List, Optional, Set
+import logging
 from fastapi import WebSocket
 
 from app.schemas.network import TelemetryMessage, TelemetryBandwidth
-from app.network.interfaces import get_active_interface_ip, get_network_interfaces
+from app.network.interfaces import get_network_interfaces
 from app.network.gateway import (
-    get_default_gateway,
     check_internet_connectivity,
-    check_gateway_connectivity,
-    measure_tcp_connect_latency
+    measure_tcp_connect_latency,
 )
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.models.entities import NetworkMetricModel
-from app.core.config import settings
+
+logger = logging.getLogger("netscope.traffic")
 
 def format_speed(bytes_per_sec: float) -> str:
-    """Formats byte rate into human readable string (KB/s or MB/s)."""
-    if bytes_per_sec >= 1_048_576:
-        return f"{bytes_per_sec / 1_048_576:.2f} MB/s"
-    elif bytes_per_sec >= 1024:
+    """Formats raw bytes per second into human readable bandwidth representation."""
+    if bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.1f} B/s"
+    elif bytes_per_sec < 1024 * 1024:
         return f"{bytes_per_sec / 1024:.1f} KB/s"
+    elif bytes_per_sec < 1024 * 1024 * 1024:
+        return f"{bytes_per_sec / (1024 * 1024):.2f} MB/s"
     else:
-        return f"{bytes_per_sec:.0f} B/s"
+        return f"{bytes_per_sec / (1024 * 1024 * 1024):.2f} GB/s"
 
 def calculate_health_score(latency_ms: Optional[float], packet_loss: float = 0.0) -> int:
     """Computes a deterministic network health score between 0 and 100."""
-    if latency_ms is None and packet_loss >= 100.0:
-        return 0
-
     score = 100
     if latency_ms is None:
-        score -= 50
-    elif latency_ms > 200:
+        return 20
+    if latency_ms > 150:
         score -= 40
-    elif latency_ms > 100:
-        score -= 25
-    elif latency_ms > 50:
+    elif latency_ms > 80:
+        score -= 20
+    elif latency_ms > 40:
         score -= 10
 
-    if packet_loss > 20:
-        score -= 50
+    if packet_loss > 10:
+        score -= 40
     elif packet_loss > 0:
         score -= int(packet_loss * 2)
 
-    return max(0, min(100, score))
+    return max(10, min(100, score))
 
 class TrafficMonitor:
     def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
+        # Independent client queues and tasks for slow-client isolation
+        self.client_queues: Dict[WebSocket, asyncio.Queue] = {}
+        self.client_tasks: Dict[WebSocket, asyncio.Task] = {}
         self.is_running: bool = False
         self.selected_interface: Optional[str] = settings.DEFAULT_INTERFACE
 
@@ -66,6 +68,11 @@ class TrafficMonitor:
         self.history: List[Dict[str, Any]] = []
         self.latest_telemetry: Optional[TelemetryMessage] = None
         self._db_persist_counter: int = 0
+
+    @property
+    def active_connections(self) -> Set[WebSocket]:
+        """Provides backwards-compatible set of active WebSocket connections."""
+        return set(self.client_queues.keys())
 
     def get_auto_interface(self) -> str:
         """Determines the active interface name associated with the default route or live traffic."""
@@ -87,28 +94,62 @@ class TrafficMonitor:
         """Allows selecting a specific network interface for focused telemetry streaming."""
         self.selected_interface = name
 
+    async def _client_sender(self, websocket: WebSocket, queue: asyncio.Queue):
+        """Independent background sender task per client, isolating slow/buffering connections."""
+        try:
+            while True:
+                payload = await queue.get()
+                await websocket.send_text(payload)
+                queue.task_done()
+        except (asyncio.CancelledError, Exception):
+            pass
+        finally:
+            self.disconnect_client(websocket)
+
     async def connect_client(self, websocket: WebSocket):
+        """Accepts a new client connection, assigns an isolated bounded queue, and begins sender loop."""
         await websocket.accept()
-        self.active_connections.add(websocket)
+        q: asyncio.Queue = asyncio.Queue(maxsize=10)
+        task = asyncio.create_task(self._client_sender(websocket, q))
+        self.client_queues[websocket] = q
+        self.client_tasks[websocket] = task
+
         if self.latest_telemetry:
             try:
-                await websocket.send_text(self.latest_telemetry.model_dump_json())
-            except Exception:
+                q.put_nowait(self.latest_telemetry.model_dump_json())
+            except asyncio.QueueFull:
                 pass
 
     def disconnect_client(self, websocket: WebSocket):
-        self.active_connections.discard(websocket)
+        """Cleanly removes disconnected client and cancels its independent sender task."""
+        if websocket in self.client_tasks:
+            task = self.client_tasks.pop(websocket)
+            if not task.done():
+                task.cancel()
+        self.client_queues.pop(websocket, None)
 
     async def broadcast(self, message: TelemetryMessage):
+        """
+        Broadcasts telemetry message to all connected clients.
+        Drops oldest message if a slow client queue is full, ensuring non-blocking delivery.
+        """
         payload = message.model_dump_json()
-        dead_connections = set()
-        for conn in list(self.active_connections):
+        dead_clients = []
+
+        for ws, q in list(self.client_queues.items()):
             try:
-                await asyncio.wait_for(conn.send_text(payload), timeout=1.0)
+                if q.full():
+                    try:
+                        q.get_nowait()  # Drop oldest unconsumed message to isolate slow client
+                        q.task_done()
+                    except asyncio.QueueEmpty:
+                        pass
+                q.put_nowait(payload)
             except Exception:
-                dead_connections.add(conn)
-        for dead in dead_connections:
-            self.active_connections.discard(dead)
+                dead_clients.append(ws)
+
+        for ws in dead_clients:
+            self.disconnect_client(ws)
 
     async def persist_metric_to_db(
         self,
@@ -135,8 +176,8 @@ class TrafficMonitor:
                 )
                 session.add(record)
                 await session.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to persist metric snapshot to database: {e}", exc_info=True)
 
     async def start_loop(self):
         """Continuous background loop sampling per-interface throughput and genuine ICMP latency."""
@@ -229,15 +270,22 @@ class TrafficMonitor:
                         )
                     )
 
-                if self.active_connections:
+                if self.client_queues:
                     await self.broadcast(msg)
 
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as e:
+                logger.error(f"Error in traffic monitor loop: {e}", exc_info=True)
                 await asyncio.sleep(1.0)
 
     def stop_loop(self):
+        """Stops the monitoring loop and cancels all active client sender tasks."""
         self.is_running = False
+        for task in list(self.client_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self.client_tasks.clear()
+        self.client_queues.clear()
 
 traffic_monitor = TrafficMonitor()

@@ -26,7 +26,8 @@ target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
-    url = settings.SYNC_DATABASE_URL
+    custom_url = config.get_main_option("sqlalchemy.url")
+    url = custom_url if (custom_url and "dummy" not in custom_url) else settings.SYNC_DATABASE_URL
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -41,7 +42,12 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
     section = config.get_section(config.config_ini_section, {})
-    section["sqlalchemy.url"] = settings.SYNC_DATABASE_URL
+    custom_url = config.get_main_option("sqlalchemy.url")
+    if custom_url and "dummy" not in custom_url:
+        section["sqlalchemy.url"] = custom_url
+    else:
+        section["sqlalchemy.url"] = settings.SYNC_DATABASE_URL
+
     connectable = engine_from_config(
         section,
         prefix="sqlalchemy.",

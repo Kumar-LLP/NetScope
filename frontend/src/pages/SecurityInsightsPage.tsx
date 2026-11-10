@@ -1,6 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
-import { SecurityFinding, GatewayBaselineResponse, AnomalyEvent } from '../types/network';
+import {
+  SecurityFinding,
+  GatewayBaselineResponse,
+  AnomalyEvent,
+  IntelligenceEvent,
+  AnomalyThresholds
+} from '../types/network';
 import { Badge } from '../components/common/Badge';
 import {
   ShieldAlert,
@@ -13,18 +19,34 @@ import {
   Check,
   RotateCcw,
   Clock,
-  Filter
+  Filter,
+  SlidersHorizontal,
+  Brain,
+  Activity,
+  Layers,
+  ArrowRight,
+  X
 } from 'lucide-react';
 
 export const SecurityInsightsPage: React.FC = () => {
   const [findings, setFindings] = useState<SecurityFinding[]>([]);
   const [baseline, setBaseline] = useState<GatewayBaselineResponse | null>(null);
   const [anomalies, setAnomalies] = useState<AnomalyEvent[]>([]);
+  const [intelEvents, setIntelEvents] = useState<IntelligenceEvent[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState<'active' | 'acknowledged' | 'resolved' | 'all'>('active');
+
+  // Filter states
+  const [findingStatusFilter, setFindingStatusFilter] = useState<'active' | 'acknowledged' | 'resolved' | 'all'>('active');
+  const [anomalyTab, setAnomalyTab] = useState<'active' | 'history'>('active');
   const [customMacInput, setCustomMacInput] = useState<string>('');
   const [showCustomMac, setShowCustomMac] = useState<boolean>(false);
+
+  // Threshold Tuning Modal
+  const [showTuneModal, setShowTuneModal] = useState<boolean>(false);
+  const [trafficSpikeKbps, setTrafficSpikeKbps] = useState<number>(5000);
+  const [packetLossPct, setPacketLossPct] = useState<number>(10);
+  const [latencySurgeMs, setLatencySurgeMs] = useState<number>(100);
 
   const downloadBlob = (blob: Blob, filename: string) => {
     const url = window.URL.createObjectURL(blob);
@@ -40,22 +62,30 @@ export const SecurityInsightsPage: React.FC = () => {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [findingsData, baselineData, anomaliesData] = await Promise.all([
-        statusFilter === 'all' || statusFilter === 'acknowledged' || statusFilter === 'resolved'
+      const [findingsData, baselineData, anomaliesData, intelData] = await Promise.all([
+        findingStatusFilter === 'all' || findingStatusFilter === 'acknowledged' || findingStatusFilter === 'resolved'
           ? api.getSecurityFindingsHistory(200)
           : api.getSecurityFindings(),
         api.getGatewayBaseline(),
-        api.getAnomalies(20).catch(() => [] as AnomalyEvent[])
+        anomalyTab === 'active'
+          ? api.getAnomalies(50).catch(() => [] as AnomalyEvent[])
+          : api.getAnomalyHistory(50).catch(() => [] as AnomalyEvent[]),
+        api.getIntelligenceEvents({ limit: 50 }).catch(() => [] as IntelligenceEvent[])
       ]);
       setFindings(findingsData);
       setBaseline(baselineData);
       setAnomalies(anomaliesData);
+      setIntelEvents(intelData);
     } catch (err) {
       console.error('Failed to load security insights data:', err);
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    loadData();
+  }, [findingStatusFilter, anomalyTab]);
 
   const handleRerunAudit = async () => {
     try {
@@ -69,9 +99,85 @@ export const SecurityInsightsPage: React.FC = () => {
     }
   };
 
-  useEffect(() => {
-    loadData();
-  }, [statusFilter]);
+  const handleEvaluateAnomalies = async () => {
+    try {
+      setActionLoading('eval-anomalies');
+      await api.evaluateAnomalies();
+      const updated = anomalyTab === 'active' ? await api.getAnomalies(50) : await api.getAnomalyHistory(50);
+      setAnomalies(updated);
+    } catch (err: any) {
+      alert(`Anomaly evaluation error: ${err.message || err}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleAcknowledgeAnomaly = async (id: number) => {
+    try {
+      setActionLoading(`ack-anom-${id}`);
+      await api.acknowledgeAnomaly(id);
+      await loadData();
+    } catch (err: any) {
+      alert(`Error acknowledging anomaly: ${err.message || err}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleResolveAnomaly = async (id: number) => {
+    try {
+      setActionLoading(`res-anom-${id}`);
+      await api.resolveAnomaly(id);
+      await loadData();
+    } catch (err: any) {
+      alert(`Error resolving anomaly: ${err.message || err}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleTuneThresholds = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      setActionLoading('tuning');
+      await api.tuneAnomalyThresholds({
+        traffic_spike_kbps: trafficSpikeKbps,
+        packet_loss_pct: packetLossPct,
+        latency_surge_ms: latencySurgeMs
+      });
+      setShowTuneModal(false);
+      alert('Anomaly thresholds calibrated and saved.');
+    } catch (err: any) {
+      alert(`Failed to tune thresholds: ${err.message || err}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleEvaluateIntelligence = async () => {
+    try {
+      setActionLoading('eval-intel');
+      const events = await api.evaluateIntelligence();
+      setIntelEvents(events);
+    } catch (err: any) {
+      alert(`Intelligence evaluation failed: ${err.message || err}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleUpdateIntelStatus = async (eventId: string, newStatus: string) => {
+    try {
+      setActionLoading(`intel-${eventId}`);
+      await api.updateIntelligenceEventStatus(eventId, newStatus);
+      const updated = await api.getIntelligenceEvents({ limit: 50 });
+      setIntelEvents(updated);
+    } catch (err: any) {
+      alert(`Failed to update status: ${err.message || err}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
 
   const handleConfirmBaseline = async (macToConfirm?: string) => {
     try {
@@ -134,8 +240,8 @@ export const SecurityInsightsPage: React.FC = () => {
   };
 
   const filteredFindings = findings.filter((f) => {
-    if (statusFilter === 'all') return true;
-    return (f.status || 'active').toLowerCase() === statusFilter;
+    if (findingStatusFilter === 'all') return true;
+    return (f.status || 'active').toLowerCase() === findingStatusFilter;
   });
 
   const criticalCount = findings.filter((f) => f.severity === 'critical' && f.status !== 'resolved').length;
@@ -148,13 +254,13 @@ export const SecurityInsightsPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-cyber-border">
         <div>
           <h1 className="text-xl font-bold text-cyber-text tracking-tight flex items-center gap-2">
-            Security Insights & Vulnerability Auditing
+            Security Intelligence & Threat Auditing
             <Badge variant={criticalCount > 0 ? 'rose' : 'emerald'}>
-              {findings.length} Observations
+              {findings.length} Audit Findings
             </Badge>
           </h1>
           <p className="text-xs text-cyber-subtext mt-1">
-            Deterministic security heuristics evaluating ARP consistency, unencrypted services, and exposure risks
+            Deterministic security heuristics, multi-domain intelligence correlation, and real-time anomaly detection
           </p>
         </div>
 
@@ -220,7 +326,7 @@ export const SecurityInsightsPage: React.FC = () => {
               {baseline?.status === 'confirmed'
                 ? 'Gateway MAC is confirmed by operator. Any ARP divergence from this baseline will trigger an immediate high-priority alert.'
                 : baseline?.status === 'mismatch'
-                ? 'CRITICAL WARNING: The detected gateway MAC does not match your confirmed baseline! Potential ARP Poisoning / Man-In-The-Middle attack.'
+                ? 'HIGH CONFIDENCE WARNING: The detected gateway MAC does not match your confirmed baseline! Potential ARP Poisoning or router replacement.'
                 : 'The gateway MAC has been detected but is UNCONFIRMED. Inspect the MAC below and confirm it to protect against ARP spoofing.'}
             </p>
           </div>
@@ -315,68 +421,366 @@ export const SecurityInsightsPage: React.FC = () => {
         </div>
 
         <div className="bg-cyber-card border border-cyber-border rounded-xl p-4">
-          <span className="text-[10px] font-mono text-cyber-subtext uppercase">Total Stored</span>
-          <div className="text-xl font-mono font-bold text-cyber-cyan mt-1">{findings.length}</div>
+          <span className="text-[10px] font-mono text-cyber-subtext uppercase">Correlated Events</span>
+          <div className="text-xl font-mono font-bold text-purple-400 mt-1">{intelEvents.length}</div>
         </div>
       </div>
 
-      {/* Real-time Network Anomaly Detections */}
-      {anomalies.length > 0 && (
-        <div className="bg-cyber-card border border-amber-900/40 rounded-xl p-5 space-y-3">
-          <div className="flex items-center justify-between border-b border-cyber-border pb-3">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-400" />
-              <h3 className="text-sm font-semibold text-cyber-text">Heuristic Network Anomalies ({anomalies.length})</h3>
+      {/* CENTRAL NETWORK INTELLIGENCE ENGINE (Phase 3) */}
+      <div className="bg-cyber-card border border-purple-900/40 rounded-xl p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-cyber-border pb-3">
+          <div className="flex items-center gap-2.5">
+            <Brain className="w-5 h-5 text-purple-400" />
+            <div>
+              <h2 className="text-sm font-semibold text-cyber-text tracking-wide">
+                Central Network Intelligence Engine
+              </h2>
+              <p className="text-xs text-cyber-subtext">
+                Multi-domain evidence correlation across discovery, traffic, ports, DNS, and device observations
+              </p>
             </div>
-            <span className="text-[10px] font-mono text-amber-400 uppercase tracking-wider bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/60">
-              Rule-Based Detection Engine
-            </span>
           </div>
-          <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-            {anomalies.map((anom, idx) => (
-              <div key={anom.id || idx} className="p-2.5 rounded-lg bg-cyber-surface border border-cyber-border/70 flex items-start justify-between text-xs">
-                <div>
-                  <div className="flex items-center gap-2 font-mono">
-                    <span className="text-amber-300 font-semibold">{anom.title}</span>
-                    <span className="text-[10px] uppercase text-cyber-subtext">[{anom.type}]</span>
+
+          <button
+            onClick={handleEvaluateIntelligence}
+            disabled={actionLoading === 'eval-intel'}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-purple-950/40 border border-purple-700/60 hover:border-purple-500 text-xs font-semibold text-purple-300 transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${actionLoading === 'eval-intel' ? 'animate-spin' : ''}`} />
+            <span>Run Correlation Engine</span>
+          </button>
+        </div>
+
+        {intelEvents.length === 0 ? (
+          <div className="text-center py-6 text-xs text-cyber-subtext font-mono">
+            No correlated cross-domain intelligence events detected. Click "Run Correlation Engine" to evaluate.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {intelEvents.map((evt) => (
+              <div
+                key={evt.event_id}
+                className="bg-black/40 border border-cyber-border rounded-xl p-4 space-y-2 font-mono text-xs"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-cyber-border/40 pb-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-purple-300 font-bold">{evt.title || evt.event_id}</span>
+                    <Badge variant={
+                      evt.severity === 'critical' ? 'rose' :
+                      evt.severity === 'high' ? 'amber' :
+                      evt.severity === 'medium' ? 'cyan' : 'gray'
+                    }>
+                      {evt.severity.toUpperCase()}
+                    </Badge>
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-purple-950/60 border border-purple-800 text-purple-300">
+                      CONFIDENCE: {evt.confidence.toUpperCase()}
+                    </span>
+                    <span className="text-[10px] text-cyber-subtext">
+                      [{evt.category.toUpperCase()}]
+                    </span>
                   </div>
-                  <p className="text-cyber-subtext text-[11px] mt-0.5">{anom.description}</p>
+
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-[10px] px-2 py-0.5 rounded ${
+                      evt.investigation_status === 'resolved'
+                        ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-800/50'
+                        : evt.investigation_status === 'acknowledged'
+                        ? 'bg-amber-950/40 text-amber-400 border border-amber-800/50'
+                        : 'bg-slate-900 text-slate-400 border border-slate-700'
+                    }`}>
+                      {evt.investigation_status.toUpperCase()}
+                    </span>
+
+                    {evt.investigation_status !== 'resolved' && (
+                      <button
+                        onClick={() => handleUpdateIntelStatus(evt.event_id, 'resolved')}
+                        disabled={actionLoading === `intel-${evt.event_id}`}
+                        className="px-2 py-0.5 rounded bg-emerald-950/40 border border-emerald-800 hover:bg-emerald-900 text-[10px] text-emerald-400"
+                      >
+                        Resolve
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <span className="text-[10px] font-mono text-slate-500 whitespace-nowrap ml-4">
-                  {new Date(anom.detected_at).toLocaleTimeString()}
-                </span>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-cyber-text font-sans">
+                  <div>
+                    <span className="text-cyber-subtext text-[10px] font-mono uppercase block">Explanation:</span>
+                    <p className="text-xs mt-0.5 leading-relaxed">{evt.explanation}</p>
+                    {evt.affected_device_ip && (
+                      <div className="mt-2 text-[11px] font-mono text-cyber-cyan">
+                        Target Host: {evt.affected_device_ip} {evt.affected_device_mac ? `(${evt.affected_device_mac})` : ''}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <span className="text-emerald-400 text-[10px] font-mono uppercase block">Recommended Action:</span>
+                    <p className="text-xs mt-0.5 bg-emerald-950/20 border border-emerald-800/40 p-2 rounded leading-relaxed text-cyber-subtext">
+                      {evt.recommended_action}
+                    </p>
+                  </div>
+                </div>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* ANOMALY MANAGEMENT & TUNING (Phase 4) */}
+      <div className="bg-cyber-card border border-amber-900/40 rounded-xl p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-cyber-border pb-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-amber-400" />
+            <div>
+              <h2 className="text-sm font-semibold text-cyber-text">
+                Network Anomaly Management
+              </h2>
+              <p className="text-xs text-cyber-subtext">
+                Sliding-window metric thresholds, traffic spikes, and gateway anomalies
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => setShowTuneModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyber-surface border border-cyber-border hover:border-cyber-subtext text-xs text-cyber-text font-medium transition-colors"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              <span>Calibrate Thresholds</span>
+            </button>
+
+            <button
+              onClick={handleEvaluateAnomalies}
+              disabled={actionLoading === 'eval-anomalies'}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-950/40 border border-amber-700/60 hover:border-amber-500 text-xs font-semibold text-amber-300 transition-colors disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${actionLoading === 'eval-anomalies' ? 'animate-spin' : ''}`} />
+              <span>Run Anomaly Evaluation</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Anomaly Tabs: Active vs History */}
+        <div className="flex items-center justify-between gap-4 border-b border-cyber-border pb-2 text-xs">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setAnomalyTab('active')}
+              className={`px-3 py-1 rounded font-medium transition-colors ${
+                anomalyTab === 'active'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                  : 'text-cyber-subtext hover:text-cyber-text'
+              }`}
+            >
+              Active Anomalies
+            </button>
+            <button
+              onClick={() => setAnomalyTab('history')}
+              className={`px-3 py-1 rounded font-medium transition-colors ${
+                anomalyTab === 'history'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                  : 'text-cyber-subtext hover:text-cyber-text'
+              }`}
+            >
+              Anomaly History
+            </button>
+          </div>
+          <span className="text-[11px] font-mono text-cyber-subtext">
+            {anomalies.length} Records
+          </span>
+        </div>
+
+        {/* Anomalies List */}
+        {anomalies.length === 0 ? (
+          <div className="text-center py-6 text-xs text-cyber-subtext font-mono">
+            No {anomalyTab === 'active' ? 'active' : 'historical'} network anomalies recorded.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {anomalies.map((anom) => (
+              <div
+                key={anom.id}
+                className="bg-black/40 border border-cyber-border rounded-xl p-4 space-y-2 text-xs font-mono"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-cyber-border/40 pb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-amber-300 font-bold">{anom.title}</span>
+                    <Badge variant={
+                      anom.severity === 'critical' ? 'rose' :
+                      anom.severity === 'high' ? 'amber' : 'cyan'
+                    }>
+                      {anom.severity.toUpperCase()}
+                    </Badge>
+                    <span className="text-[10px] text-cyber-subtext uppercase">
+                      [{anom.anomaly_type}]
+                    </span>
+                  </div>
+
+                  {/* Lifecycle Buttons */}
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-[10px] px-2 py-0.5 rounded ${
+                      anom.status === 'resolved'
+                        ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-800/50'
+                        : anom.status === 'acknowledged'
+                        ? 'bg-amber-950/40 text-amber-400 border border-amber-800/50'
+                        : 'bg-rose-950/40 text-rose-400 border border-rose-800/50'
+                    }`}>
+                      {(anom.status || 'active').toUpperCase()}
+                    </span>
+
+                    {anom.id && anom.status === 'active' && (
+                      <button
+                        onClick={() => handleAcknowledgeAnomaly(anom.id!)}
+                        disabled={actionLoading === `ack-anom-${anom.id}`}
+                        className="px-2.5 py-1 rounded bg-cyber-card border border-cyber-border hover:border-amber-400 text-amber-300 text-[10px]"
+                      >
+                        Acknowledge
+                      </button>
+                    )}
+
+                    {anom.id && anom.status !== 'resolved' && (
+                      <button
+                        onClick={() => handleResolveAnomaly(anom.id!)}
+                        disabled={actionLoading === `res-anom-${anom.id}`}
+                        className="px-2.5 py-1 rounded bg-emerald-950/40 border border-emerald-800 hover:bg-emerald-900 text-emerald-300 text-[10px]"
+                      >
+                        Resolve
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="text-cyber-text font-sans">
+                  <p className="text-xs text-cyber-subtext leading-relaxed">{anom.description}</p>
+                  <div className="mt-2 p-2 rounded bg-black/60 border border-cyber-border font-mono text-[11px] text-cyber-cyan">
+                    <span className="text-cyber-subtext block text-[9px] uppercase">Telemetry Evidence:</span>
+                    {anom.evidence}
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-cyber-border/40 flex items-center gap-4 text-[10px] text-cyber-subtext">
+                  <span>Detected: {new Date(anom.detected_at).toLocaleString()}</span>
+                  {anom.acknowledged_at && <span>Ack: {new Date(anom.acknowledged_at).toLocaleString()}</span>}
+                  {anom.resolved_at && <span>Resolved: {new Date(anom.resolved_at).toLocaleString()}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Threshold Calibration Drawer/Modal */}
+      {showTuneModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-cyber-card border border-cyber-border rounded-xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-cyber-border pb-3">
+              <div className="flex items-center gap-2">
+                <SlidersHorizontal className="w-5 h-5 text-cyber-cyan" />
+                <h3 className="text-sm font-semibold text-cyber-text">Calibrate Anomaly Thresholds</h3>
+              </div>
+              <button
+                onClick={() => setShowTuneModal(false)}
+                className="text-cyber-subtext hover:text-cyber-text"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleTuneThresholds} className="space-y-4 text-xs font-mono">
+              <div>
+                <label className="text-cyber-subtext uppercase block mb-1">
+                  Traffic Spike Throughput (KB/s):
+                </label>
+                <input
+                  type="number"
+                  min="100"
+                  step="100"
+                  value={trafficSpikeKbps}
+                  onChange={(e) => setTrafficSpikeKbps(Number(e.target.value))}
+                  className="w-full bg-slate-900 border border-cyber-border rounded px-3 py-2 text-cyber-text focus:outline-none focus:border-cyber-cyan"
+                />
+                <span className="text-[10px] text-cyber-subtext mt-0.5 block">
+                  Alert when instant rate exceeds this ceiling (e.g. 5000 KB/s = ~5 MB/s)
+                </span>
+              </div>
+
+              <div>
+                <label className="text-cyber-subtext uppercase block mb-1">
+                  Packet Loss Threshold (%):
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  step="1"
+                  value={packetLossPct}
+                  onChange={(e) => setPacketLossPct(Number(e.target.value))}
+                  className="w-full bg-slate-900 border border-cyber-border rounded px-3 py-2 text-cyber-text focus:outline-none focus:border-cyber-cyan"
+                />
+              </div>
+
+              <div>
+                <label className="text-cyber-subtext uppercase block mb-1">
+                  Latency Surge Threshold (ms):
+                </label>
+                <input
+                  type="number"
+                  min="10"
+                  step="10"
+                  value={latencySurgeMs}
+                  onChange={(e) => setLatencySurgeMs(Number(e.target.value))}
+                  className="w-full bg-slate-900 border border-cyber-border rounded px-3 py-2 text-cyber-text focus:outline-none focus:border-cyber-cyan"
+                />
+              </div>
+
+              <div className="pt-3 border-t border-cyber-border flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowTuneModal(false)}
+                  className="px-3 py-1.5 rounded bg-cyber-surface border border-cyber-border text-cyber-subtext hover:text-cyber-text"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={actionLoading === 'tuning'}
+                  className="px-4 py-1.5 rounded bg-cyber-cyan text-black font-semibold disabled:opacity-50"
+                >
+                  Save & Apply
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
 
-      {/* Status Filter Tabs */}
-      <div className="flex items-center gap-2 border-b border-cyber-border pb-2 text-xs">
-        <span className="text-cyber-subtext flex items-center gap-1 font-mono uppercase text-[11px] mr-2">
-          <Filter className="w-3.5 h-3.5" /> Filter:
-        </span>
-        {(['active', 'acknowledged', 'resolved', 'all'] as const).map((st) => (
-          <button
-            key={st}
-            onClick={() => setStatusFilter(st)}
-            className={`px-3 py-1 rounded-md font-medium capitalize transition-colors ${
-              statusFilter === st
-                ? 'bg-cyber-cyan/20 text-cyber-cyan border border-cyber-cyan/40'
-                : 'text-cyber-subtext hover:text-cyber-text'
-            }`}
-          >
-            {st}
-          </button>
-        ))}
-      </div>
-
-      {/* Findings Cards List */}
+      {/* Heuristic Security Audit Findings (Deterministic Heuristics) */}
       <div className="space-y-4">
+        <div className="flex items-center justify-between border-b border-cyber-border pb-2 text-xs">
+          <span className="text-cyber-subtext flex items-center gap-1 font-mono uppercase text-[11px]">
+            <Filter className="w-3.5 h-3.5" /> Filter Findings:
+          </span>
+          <div className="flex items-center gap-2">
+            {(['active', 'acknowledged', 'resolved', 'all'] as const).map((st) => (
+              <button
+                key={st}
+                onClick={() => setFindingStatusFilter(st)}
+                className={`px-3 py-1 rounded-md font-medium capitalize transition-colors ${
+                  findingStatusFilter === st
+                    ? 'bg-cyber-cyan/20 text-cyber-cyan border border-cyber-cyan/40'
+                    : 'text-cyber-subtext hover:text-cyber-text'
+                }`}
+              >
+                {st}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {filteredFindings.length === 0 ? (
           <div className="text-center py-12 bg-cyber-card border border-cyber-border rounded-xl">
             <ShieldCheck className="w-12 h-12 text-emerald-400/80 mx-auto mb-3" />
-            <h3 className="text-base font-medium text-cyber-text">No {statusFilter !== 'all' ? statusFilter : ''} Findings</h3>
+            <h3 className="text-base font-medium text-cyber-text">No {findingStatusFilter !== 'all' ? findingStatusFilter : ''} Findings</h3>
             <p className="text-xs text-cyber-subtext mt-1">
               Your network interfaces and observed traffic comply with all baseline security heuristics.
             </p>

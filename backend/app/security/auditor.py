@@ -68,12 +68,12 @@ class SecurityAuditor:
                         SecurityFindingSchema(
                             rule_id="SEC-001",
                             severity="critical",
-                            title="Default Gateway MAC Address Changed (Potential ARP Poisoning or Gateway Replacement)",
+                            title="Default Gateway MAC Address Divergence Detected",
                             category="mitm_detection",
-                            confidence="confirmed",
-                            description="The physical MAC address of the default gateway router has diverged from your confirmed baseline.",
+                            confidence="high",
+                            description="The physical Layer 2 MAC address of the default gateway router has diverged from your established baseline.",
                             evidence=f"Confirmed Baseline: {confirmed_baseline_mac} (confirmed at {confirmed_at or 'earlier'}) -> Detected Active MAC: {gw_mac} on Gateway IP {gw_ip}",
-                            impact="A rogue device on the local network segment may be executing an ARP spoofing attack, or the gateway router was physically replaced.",
+                            impact="A rogue device on the local network segment may be executing an ARP spoofing attack, or the gateway router was physically replaced / Wi-Fi mesh access point shifted.",
                             remediation="Inspect local router/switch ARP tables. Verify router MAC address against physical hardware sticker. Re-baseline if router was legitimately upgraded.",
                             target=gw_ip,
                             created_at=now
@@ -134,10 +134,10 @@ class SecurityAuditor:
                     )
                 )
 
-        # Rule SEC-003: DNS Resolver Hygiene & Encryption Audit
+        # Rule SEC-003: DNS Resolver Transport & Encryption Verification
+        # Note: Resolver IP address alone is NOT proof of transport encryption. Standard OS DNS queries over port 53 are unencrypted UDP.
         dns_servers = get_dns_servers()
         for dns_ip in dns_servers:
-            is_secure_known = dns_ip in ("1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112")
             is_local_gw = (dns_ip == gw_ip)
             is_loopback = False
             is_private = False
@@ -145,22 +145,26 @@ class SecurityAuditor:
                 ip_obj = ipaddress.ip_address(dns_ip)
                 is_loopback = ip_obj.is_loopback
                 is_private = ip_obj.is_private or ip_obj.is_link_local
-            except Exception:
+            except ValueError:
                 pass
 
-            # Only flag if external unverified public IP without known DoH/DoT evidence
-            if not is_secure_known and not is_local_gw and not is_loopback and not is_private:
+            # Inform operator about standard UDP/53 transport exposure on external resolvers
+            if not is_local_gw and not is_loopback and not is_private:
                 findings.append(
                     SecurityFindingSchema(
                         rule_id="SEC-003",
                         severity="low",
-                        title=f"External Unverified DNS Resolver in Use ({dns_ip})",
+                        title=f"External Plaintext DNS Transport ({dns_ip})",
                         category="dns_hygiene",
-                        confidence="potential",
-                        description=f"System queries are resolving through external DNS server {dns_ip}. Without verified DNS-over-HTTPS (DoH) or DNS-over-TLS (DoT), queries are presumed to use standard unencrypted UDP port 53.",
-                        evidence=f"Active DNS Nameserver: {dns_ip} (Standard UDP/53 presumed)",
-                        impact="Unencrypted DNS queries can be logged, profiled, or spoofed by intermediate network operators and upstream carriers.",
-                        remediation="Configure DNS-over-HTTPS (DoH) or switch to verified privacy-centric DNS providers (Cloudflare 1.1.1.1 or Quad9 9.9.9.9).",
+                        confidence="moderate",
+                        description=(
+                            f"System DNS queries resolve through external resolver {dns_ip}. Standard operating system "
+                            "resolver configurations transmit queries over plaintext UDP port 53 regardless of destination IP, "
+                            "unless an explicit local DNS-over-HTTPS (DoH) or DNS-over-TLS (DoT) stub daemon is active."
+                        ),
+                        evidence=f"Active DNS Nameserver: {dns_ip} (Standard OS UDP/53 transport active; resolver IP alone does not guarantee transport encryption)",
+                        impact="Unencrypted DNS queries can be passively monitored, logged, or altered by intermediate network devices and upstream transit providers.",
+                        remediation="Configure a local encrypted stub resolver (such as cloudflared, stubby, or systemd-resolved with DoT enabled).",
                         target=dns_ip,
                         created_at=now
                     )

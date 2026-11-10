@@ -204,27 +204,85 @@ export interface TelemetryPayload {
 
 export interface AnomalyEvent {
   id?: number;
-  type: string;
+  anomaly_type: string;
   severity: 'low' | 'medium' | 'high' | 'critical';
   title: string;
   description: string;
-  evidence: Record<string, any>;
+  evidence: string;
+  target?: string | null;
+  confidence?: string;
+  threshold_trigger?: string | null;
   detected_at: string;
+  status?: string;
+  acknowledged_at?: string | null;
+  resolved_at?: string | null;
+  notes?: string | null;
 }
 
 export interface AnomalyThresholds {
-  throughput_spike_multiplier?: number;
-  packet_loss_surge_pct?: number;
-  unknown_device_burst_count?: number;
-  latency_spike_multiplier?: number;
+  traffic_spike_kbps?: number;
+  packet_loss_pct?: number;
+  latency_surge_ms?: number;
+}
+
+export interface IntelligenceEvent {
+  id?: number;
+  event_id: string;
+  category: string;
+  severity: 'info' | 'low' | 'medium' | 'high' | 'critical';
+  confidence: string;
+  timestamp: string;
+  affected_device_ip?: string | null;
+  affected_device_mac?: string | null;
+  evidence_references: string;
+  explanation: string;
+  recommended_action: string;
+  investigation_status: string;
+  title?: string;
+  resolved_at?: string | null;
+}
+
+export interface PacketCaptureSession {
+  id: string;
+  interface_name: string;
+  status: string;
+  total_packets: number;
+  tcp_packets: number;
+  udp_packets: number;
+  icmp_packets: number;
+  dns_packets: number;
+  other_packets: number;
+  total_bytes: number;
+  duration_seconds: number;
+  error_message?: string | null;
+  started_at: string;
+  stopped_at?: string | null;
+}
+
+export interface PacketStats {
+  total_packets: number;
+  tcp_packets: number;
+  udp_packets: number;
+  icmp_packets: number;
+  dns_packets: number;
+  other_packets: number;
+  total_bytes: number;
+  duration_seconds: number;
 }
 
 export interface PacketCaptureStatus {
-  is_running: boolean;
-  total_captured: number;
-  protocol_distribution: Record<string, number>;
-  top_conversations: { src: string; dst: string; protocol: string; packets: number; bytes: number }[];
-  recent_packets: {
+  is_capturing?: boolean;
+  is_running?: boolean;
+  supported?: boolean;
+  session_id?: string | null;
+  interface_name?: string | null;
+  stats?: PacketStats;
+  note?: string | null;
+  error_message?: string | null;
+  total_captured?: number;
+  protocol_distribution?: Record<string, number>;
+  top_conversations?: { src: string; dst: string; protocol: string; packets: number; bytes: number }[];
+  recent_packets?: {
     timestamp: string;
     protocol: string;
     src_ip: string;
@@ -234,8 +292,8 @@ export interface PacketCaptureStatus {
     length: number;
     summary: string;
   }[];
-  start_time: string | null;
-  error: string | null;
+  start_time?: string | null;
+  error?: string | null;
 }
 
 export interface LearningTopic {
@@ -250,8 +308,10 @@ export interface LearningTopic {
 }
 
 export interface PaginatedDevicesResponse {
-  items: DiscoveredDevice[];
-  total: number;
+  devices: DiscoveredDevice[];
+  total_count: number;
+  items?: DiscoveredDevice[];
+  total?: number;
   page: number;
   page_size: number;
   total_pages: number;

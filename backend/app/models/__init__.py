@@ -11,6 +11,8 @@ from app.models.entities import (
     ApplicationSettingsModel,
     PacketCaptureSessionModel,
     NetworkAnomalyModel,
+    DeviceObservationModel,
+    IntelligenceEventModel,
 )
 
 __all__ = [
@@ -26,4 +28,6 @@ __all__ = [
     "ApplicationSettingsModel",
     "PacketCaptureSessionModel",
     "NetworkAnomalyModel",
+    "DeviceObservationModel",
+    "IntelligenceEventModel",
 ]
